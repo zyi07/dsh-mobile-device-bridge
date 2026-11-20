@@ -5520,6 +5520,69 @@ async function runShellText(adb, cmd) {
   return '$ ' + cmd + '\n' + text;
 }
 
+function toBase64(bytes) {
+  let s = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(s);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const BRIDGE = '/mobile-bridge';
+const POLL_INTERVAL_MS = 1500;
+
+/** 执行一条宿主派下来的任务。 */
+async function runJob(job) {
+  const adb = STATE.adb;
+  if (!adb) { return { ok: false, error: '浏览器端尚未连接设备（请在设置页点「连接设备」）' }; }
+  try {
+    if (job.kind === 'shell') {
+      return { ok: true, output: await runShellText(adb, job.data.cmd) };
+    }
+    if (job.kind === 'screenshot') {
+      const bytes = await adb.subprocess.noneProtocol.spawnWait('screencap -p');
+      if (bytes.length > 12 * 1024 * 1024) {
+        return { ok: false, error: `截图过大（${bytes.length} 字节），未回传` };
+      }
+      return { ok: true, base64: toBase64(bytes) };
+    }
+    return { ok: false, error: '未知任务类型 ' + job.kind };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
+/**
+ * 轮询宿主取任务 → 在本地 adb 上执行 → 回传结果。
+ * 这条链路与 UI 是否可见无关：只要标签页还活着就会跑；
+ * 但标签页被浏览器挂起（后台节流）时会变慢。
+ */
+function startBridge(connection) {
+  let stopped = false;
+  (async () => {
+    while (!stopped) {
+      const started = Date.now();
+      try {
+        const res = await connection.rpc.call(BRIDGE, 'poll', {
+          device: STATE.info
+            ? { model: STATE.info.model, android: STATE.info.android, serial: STATE.info.serial }
+            : null,
+        });
+        if (res && res.ok && res.value && res.value.job) {
+          const job = res.value.job;
+          const outcome = await runJob(job);
+          await connection.rpc.call(BRIDGE, 'result', Object.assign({ id: job.id }, outcome));
+        }
+      } catch { /* 宿主还没注册通道 / 网络抖动：下一轮再试 */ }
+      await sleep(Math.max(0, POLL_INTERVAL_MS - (Date.now() - started)));
+    }
+  })();
+  return () => { stopped = true; };
+}
+
 const CSS = `
 .mb-root { display: flex; flex-direction: column; gap: 14px; font-size: 13px; }
 .mb-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -5789,6 +5852,12 @@ function apply(ctx) {
   }), 'mobile-bridge: locale');
 
   const t = ctx.locale.bind(NS);
+
+  // 与宿主建立任务通道（不依赖 UI 是否挂载）
+  const connection = ctx.get('connection');
+  if (connection && connection.rpc && typeof connection.rpc.call === 'function') {
+    ctx.effect(() => startBridge(connection), 'mobile-bridge: host bridge');
+  }
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',

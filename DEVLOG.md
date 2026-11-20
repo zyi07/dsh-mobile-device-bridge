@@ -77,3 +77,34 @@
 
 **顺带发现**：TNY-AL00 是华为机型（VID 0x12d1）但跑 Android 10。
 旧版「华为 VID ⇒ HarmonyOS ⇒ 拒绝连接」的分支正好会挡住这台机器，重建版已无该判断。
+
+## 2026-11-20 16:52 — 打通「智能体远程驱动手机」的桥
+
+**目标**：让智能体/本机脚本能间接在手机执行 ADB，而不是只能手点 UI。
+
+**约束**：WebUSB 只在浏览器进程可用；宿主拿不到用户电脑的 USB。
+`connection` 的 RPC 只有 client→host 单向（`HostConnectionRpc.handle` /
+`ClientConnectionRpc.call`），没有反向调用。
+
+**方案（两个方向都不 import 任何 @deepseek-ai 包）**：
+- 浏览器→宿主：已认证 RPC 通道 `/mobile-bridge`
+  - `poll`：取任务（payload 顺带带 device 信息）
+  - `result`：回传 {id, ok, output|base64}
+- 宿主→本机：`ctx.webServer` 上 prefix 路由 `/mobile-bridge`
+  - `GET /status`、`POST /exec`、`POST /screenshot`（截图写 /tmp 并返回路径）
+  - 仅接受 127.0.0.1 / ::1，非 loopback 一律 403
+- 客户端 `apply()` 里起轮询循环，与 UI 是否挂载无关；标签页活着就能被调。
+
+**踩到的坑**：
+`export const inject = ['webServer','connection']` 不生效，patch 行级 inject 也不生效，
+启用时报 `cannot get property "webServer" without inject`。
+改成 cordis 的 `ctx.inject(['webServer'], cb)` / `ctx.inject(['connection'], cb)`
+子上下文后 `application: applied`，无警告。
+
+**已验证**：
+- `curl 127.0.0.1:3080/mobile-bridge/status` → `{"ok":true,"browserAlive":false,...}` 200
+- `exec` 在浏览器未轮询时返回明确中文错误
+- 离线执行 client.js：轮询循环发出 `poll`→执行→回传 `result`（id/ok/error 均正确）
+
+**待验证**：浏览器刷新后 `browserAlive` 变 true、真机命令返回。
+**限制**：标签页被浏览器后台节流时轮询会变慢；只支持 Android/ADB。

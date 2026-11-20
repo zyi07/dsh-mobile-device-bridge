@@ -1,8 +1,10 @@
 # dsh-mobile-bridge bundle patch
 #
-# 插入本插件自己的行。必须包在 `- insert:` 下面；
-# 写成顶层 `- id: ...` 会被当作"覆盖已存在的行"，
+# 必须包在 `- insert:` 下面：顶层 `- id: ...` 是"覆盖已存在的行"，
 # 目标不存在时 Loader 会警告并跳过，等于什么都没装。
+#
+# 宿主半需要的服务在 index.js 里用 ctx.inject([...]) 取，
+# 不依赖模块级或行级 inject（实测这条加载路径上均未生效）。
 
 - insert:
     - id: mobile-bridge
