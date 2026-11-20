@@ -32,6 +32,14 @@ export function apply(ctx) {
   let seq = 0;
   let lastSeen = 0;
   let device = null;
+  /** 自诊断：intercept 是否注册成功、match/handler 各被调多少次、看到过什么端点 */
+  const diag = {
+    connectionService: false,
+    fetchRoutes: 0,
+    fetchCalls: 0,
+    lastMethod: null,
+    fetchErrors: [],
+  };
 
   const now = () => Date.now();
   const browserAlive = () => now() - lastSeen < BROWSER_STALE_MS;
@@ -113,6 +121,7 @@ export function apply(ctx) {
               device,
               queued: queue.length,
               inflight: jobs.size,
+              diag,
             });
             return;
           }
@@ -164,24 +173,75 @@ export function apply(ctx) {
   });
 
   ctx.inject(['connection'], (connCtx) => {
-    const owns = (endpoint) => endpoint === `${EP_PREFIX}/poll` || endpoint === `${EP_PREFIX}/result`;
-    connCtx.effect(() => connCtx.connection.rpc.intercept(API_CHANNEL, owns, async (endpoint, payload) => {
-      const body = payload && typeof payload === 'object' ? payload : {};
+    diag.connectionService = true;
+
+    // /api 通道只允许一个 interceptor（已被网关占用），所以走精确 Fetch 路由。
+    // Fetch 路由返回的是原始 Response，需要自己拼 RPC 信封，并回显 rpcId
+    // （客户端会校验 rpcId 一致，不一致直接抛错）。
+    const rpcRoute = (handler) => async (request) => {
+      let body = {};
+      try { body = await request.json(); } catch { /* 空体 */ }
+      const rpcId = body && body.rpcId;
+      const method = (body && body.method) || '';
+      let result;
       try {
-        // intercept 收到的 endpoint 可能带也可能不带通道前缀，统一按尾部判断
-        if (endpoint === `${EP_PREFIX}/poll` || endpoint === 'poll' || endpoint.endsWith('/poll')) {
-          lastSeen = now();
-          device = body.device || null;
-          return okValue({ job: queue.shift() || null, deviceSeen: device });
-        }
-        if (endpoint === `${EP_PREFIX}/result` || endpoint === 'result' || endpoint.endsWith('/result')) {
-          lastSeen = now();
-          return okValue({ accepted: settle(body.id, body) });
-        }
-        return fail('unknown-endpoint', `未知端点 ${endpoint}`);
+        result = await handler(method, (body && body.payload) || {});
       } catch (e) {
-        return fail('handler-failed', String(e && e.message ? e.message : e));
+        result = fail('handler-failed', String(e && e.message ? e.message : e));
       }
-    }), 'mobile-bridge: rpc channel');
+      return new Response(JSON.stringify({ type: 'server-response', rpcId, result }), {
+        status: 200,
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+      });
+    };
+
+    const pollRoute = rpcRoute(async (method, payload) => {
+      diag.fetchCalls += 1;
+      diag.lastMethod = method;
+      lastSeen = now();
+      device = payload.device || null;
+      return okValue({ job: queue.shift() || null, deviceSeen: device });
+    });
+
+    const resultRoute = rpcRoute(async (method, payload) => {
+      diag.fetchCalls += 1;
+      diag.lastMethod = method;
+      lastSeen = now();
+      return okValue({ accepted: settle(payload.id, payload) });
+    });
+
+    // path 到底要不要带 /api 前缀，文档与实现字面不一致，两种都注册。
+    const paths = [
+      ['/api/mobile-bridge/poll', pollRoute],
+      ['/mobile-bridge/poll', pollRoute],
+      ['/api/mobile-bridge/result', resultRoute],
+      ['/mobile-bridge/result', resultRoute],
+    ];
+
+    connCtx.effect(() => {
+      const disposers = [];
+      for (const [path, fetch] of paths) {
+        try {
+          const p = connCtx.connection.fetch.register({
+            path,
+            methods: ['POST'],
+            requestBody: 'buffered',
+            fetch,
+          });
+          diag.fetchRoutes += 1;
+          if (p && typeof p.then === 'function') {
+            p.then((dispose) => { if (typeof dispose === 'function') disposers.push(dispose); },
+                   (e) => { diag.fetchErrors.push(String(e && e.message ? e.message : e)); });
+          }
+        } catch (e) {
+          diag.fetchErrors.push(String(e && e.message ? e.message : e));
+        }
+      }
+      return () => {
+        for (const dispose of disposers) {
+          try { const r = dispose(); if (r && r.then) r.catch(() => {}); } catch { /* ignore */ }
+        }
+      };
+    }, 'mobile-bridge: fetch routes');
   });
 }
