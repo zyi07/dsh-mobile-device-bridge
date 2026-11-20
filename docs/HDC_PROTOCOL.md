@@ -265,3 +265,73 @@ daemon 若不在读 OUT，不可能响应 RESET。因此：
 
 下一轮两件事：① RESET 优先的会话重建序列（`tools/hdc_probe3.py`）；
 ② 读**设备侧 hilog** 里 hdcd 的日志——让设备自己说出拒绝原因，胜过继续猜帧。
+
+## 第四轮结果（2026-11-20 夜 → 21 日凌晨）
+
+### 已由 daemon 日志证实的两个根因
+
+**R1｜UB 头与帧必须分两次 bulk 写**
+合并成一次 61 字节写，daemon 会整包当软复位丢弃：
+
+```
+[SendToHdcStream:189] SendToHdcStream softreset dataSize:61 payloadSize:0 childRet:0
+```
+
+`payloadSize:0` 说明帧体 31 字节的握手负载被解析成 0，帧根本没被识别。
+
+**R2｜`version` 必须与 daemon 完整版本串逐字节相等**
+
+```
+[DaemonSessionHandshake:1032] DaemonSessionHandshake failed!
+    version not match [Ver: 3.2.0f] vs [Ver: 3.2.0f73c487f8b34a2ba5]
+```
+
+即客户端要声称 `Ver: 3.2.0f73c487f8b34a2ba5`（28 字符），不能用短版本。
+
+对比真 hdc 成功时的路径（同一份日志）：
+
+```
+[DispatchToWorkThread:564] New session coming, restart old sessionId:225******822
+[DispatchMainThreadCommand:1393] START_SESSION sessionId:273******239 instance:daemon
+[RsaSignVerify:678] sign verify success for session 273******239
+[HandDaemonAuthSignature:830] auth success for session 273******239
+```
+
+我们的帧（合并写时）只触发一条 `softreset ... payloadSize:0`，连 `START_SESSION` 都没进。
+
+### RESET 语义（`USBHead.option = 2`）已确认
+
+```
+[ResetOldSession:233] Hostside softreset to restart daemon, old sessionId:0*0 isSoftReset:1
+[DispatchMainThreadCommand:1399] STOP_SESSION sessionId:0*0
+```
+
+RESET 会停掉会话、心跳随之停止；之后需要**重新发起**会话，daemon 不会自己重建。
+副作用：`hdc list targets` 会短暂 `[Empty]`，重新 list 即恢复；不重启设备。
+
+### daemon 侧还有一个间歇性发送失败
+
+```
+[SendUSBBlock:91] SendUSBRaw index failed      ← daemon 想回包但发不出去
+```
+
+配合 `NEW_SESSION_DROP_USB_DATA_TIME_MAX_MS = 1000`，写完后需等待约 1 秒再读，
+并对 STALL（`rc=-9 PIPE`）做 `clear_halt` 重试。
+
+### 疑似 daemon 握手应答（待核实）
+
+执行 Agent 报告拿到了如下应答，但**未把对应那次运行的 jsonl/hilog 一起提供**，
+且其 `version` 字段是短串 `Ver: 3.2.0f`，与同一份日志里"短版本必然失败"的结论相冲突，
+故暂列**待核实**：
+
+```
+UB : 55 42 01 00000000 00000032
+HW : 48 57 00 00 01 00 08 00 00 00 1F
+会话头: 08 00 10 01 18 00 20 09        (flag=1 = CMD_KERNEL_HANDSHAKE)
+负载  : f1 banner "OHOS HDC" / f2 authType=3 (AUTH_PUBLICKEY) / f3 sid=0
+        f4 connectKey="" / f5 buf="" / f6 version "Ver: 3.2.0f"
+```
+
+若成立，则 auth 流程为：
+`AUTH_NONE(0) → daemon 回 AUTH_PUBLICKEY(3) → 客户端送公钥 → daemon 回 token → 客户端送签名 → AUTH_OK(4)`。
+`tools/hdc_probe4.py` 即按此流程推进，并把收到的每个包原样记录以待核对。
