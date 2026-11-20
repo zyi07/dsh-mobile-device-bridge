@@ -37,7 +37,14 @@ const rebuilt = C.encodeFrame({
   channelId: f.channelId,
   commandFlag: f.commandFlag,
   checkSum: f.checkSum,
-  payload: C.encodeHandshakePayload({ channelId: hs[2], version: dec.decode(hs[6]) }),
+  // 注意顺序：f2=authType, f3=sessionId（以 session.h 的结构体为准）
+  payload: C.encodeHandshakePayload({
+    authType: hs[2],
+    sessionId: hs[3],
+    connectKey: dec.decode(hs[4]),
+    buf: dec.decode(hs[5]),
+    version: dec.decode(hs[6]),
+  }),
 });
 assert.deepEqual([...rebuilt], [...raw], '重编码结果与抓包不一致');
 

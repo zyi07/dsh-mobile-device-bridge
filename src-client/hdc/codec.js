@@ -26,6 +26,37 @@ export const HEAD_SIZE = 11;
 /** ChannelHandShake 固定长度 */
 export const HANDSHAKE_SIZE = 108;
 export const BANNER = 'OHOS HDC';
+/** USBHead.option 取值（define_enum.h: enum UsbProtocolOption） */
+export const USB_OPTION_HEADER = 1;
+export const USB_OPTION_RESET = 2;
+/** HdcCommand（define_enum.h），实测/源码确认 */
+export const CMD = {
+  HELP: 0,
+  HANDSHAKE: 1,
+  CHANNEL_CLOSE: 2,
+  TARGET_DISCOVER: 4,
+  TARGET_LIST: 5,
+  TARGET_ANY: 6,
+  TARGET_CONNECT: 7,
+  ECHO: 9,
+  CHECK_SERVER: 13,
+  CHECK_DEVICE: 14,
+  UNITY_EXECUTE: 1001,
+  UNITY_EXECUTE_EX: 1200,
+  SHELL_INIT: 2000,
+  SHELL_DATA: 2001,
+  HEARTBEAT_MSG: 5000,
+};
+/** AuthType（session.h: enum AuthType） */
+export const AUTH = {
+  NONE: 0,
+  TOKEN: 1,
+  SIGNATURE: 2,
+  PUBLICKEY: 3,
+  OK: 4,
+  FAIL: 5,
+  SSL_TLS_PSK: 6,
+};
 
 // ---------------------------------------------------------------- protobuf
 
@@ -107,17 +138,30 @@ export function encodeSessionHead({ channelId, commandFlag, checkSum = 0, vCode 
 // ------------------------------------------------------------ 握手负载
 
 /**
- * 握手负载 protobuf。字段号来自实测抓包（见 docs/HDC_PROTOCOL.md）：
- *   1 = banner("OHOS HDC")  2 = channelId  3 = 1  4 = 空  5 = 空  6 = version
- * 源码里这几个字段的语义名没有一一对应公开，故按序号保留，勿臆造名字。
+ * 握手负载 protobuf。
+ *
+ * 字段顺序**以 session.h 的 struct SessionHandShake 为准**（这不是推测）：
+ *   struct SessionHandShake { string banner; uint8_t authType; uint32_t sessionId;
+ *                             string connectKey; string buf; string version; };
+ * 因此：f1=banner  f2=authType  f3=sessionId  f4=connectKey  f5=buf  f6=version
+ *
+ * ⚠️ 早期版本把 f2/f3 写反（sessionId 放 f2），设备按 authType 解析随机数后
+ * 判为 invalid auth type 并静默丢弃——这是"发了但设备无任何回应"的真因。
  */
-export function encodeHandshakePayload({ banner = BANNER, channelId = 0, version = '' }) {
+export function encodeHandshakePayload({
+  banner = BANNER,
+  authType = 0,          // AuthType: AUTH_NONE=0, AUTH_TOKEN=1, AUTH_SIGNATURE=2, AUTH_PUBLICKEY=3, AUTH_OK=4
+  sessionId = 0,
+  connectKey = '',
+  buf = '',
+  version = '',
+}) {
   return [
     ...fieldBytes(1, [...utf8.encode(banner)]),
-    ...fieldVarint(2, channelId),
-    ...fieldVarint(3, 1),
-    ...fieldBytes(4, []),
-    ...fieldBytes(5, []),
+    ...fieldVarint(2, authType),
+    ...fieldVarint(3, sessionId),
+    ...fieldBytes(4, [...utf8.encode(connectKey)]),
+    ...fieldBytes(5, [...utf8.encode(buf)]),
     ...fieldBytes(6, [...utf8.encode(version)]),
   ];
 }

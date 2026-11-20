@@ -170,6 +170,82 @@ load prikey success / sign success / response auth signture success
 
 ---
 
+## 源码核对结果（第三轮，已定位前两轮失败根因）
+
+从 `openharmony/developtools_hdc` 拉到并核对了 `define.h` / `define_plus.h` / `define_enum.h` / `session.h`。
+
+### USB 传输层结构体（`define_plus.h`，此前只能靠字节反推）
+
+```c
+struct USBHead {          // packed，实测 11 字节，与抓包完全吻合
+    uint8_t  flag[2];     // "UB"
+    uint8_t  option;      // enum UsbProtocolOption: HEADER=1, RESET=2
+    uint32_t sessionId;
+    uint32_t dataSize;    // 大端，等于紧随其后帧的字节数
+};
+```
+
+### 会话头结构体（`session.h`，vCode 常量也在此）
+
+```c
+struct PayloadProtect {
+    uint32_t channelId;
+    uint32_t commandFlag;
+    uint8_t  checkSum;
+    uint8_t  vCode;       // payloadProtectStaticVcode = 0x09
+};
+```
+
+### ★ 握手结构体与失败根因
+
+```c
+struct SessionHandShake {
+    string  banner;       // f1  "OHOS HDC"
+    uint8_t authType;     // f2  ← 第二个字段
+    uint32_t sessionId;   // f3  ← 第三个字段
+    string  connectKey;   // f4
+    string  buf;          // f5
+    string  version;      // f6
+};
+enum AuthType { AUTH_NONE=0, AUTH_TOKEN=1, AUTH_SIGNATURE=2, AUTH_PUBLICKEY=3, AUTH_OK=4, AUTH_FAIL=5 };
+```
+
+**第一轮探针把 f2/f3 写反了**（把随机 sessionId 塞进 f2，authType=4 塞进 f3）。
+设备按 `authType` 解析 f2 得到随机大数 → 非法 auth type → **静默丢弃**。
+这正是"`write rc=0` 但设备零回应、4 种外壳变体全失败"的原因。
+
+修正后，用 `banner/authType=0/sessionId/connectKey/buf/version` 顺序重建的帧，
+与已知真实抓包（53 字节）**逐字节一致**。
+
+### 命令号（`define_enum.h: enum HdcCommand`，需要的几个）
+
+| 值 | 名称 | 用途 |
+|---|---|---|
+| 1 | `CMD_KERNEL_HANDSHAKE` | 握手帧 |
+| 2 | `CMD_KERNEL_CHANNEL_CLOSE` | 通道关闭（命令结束标志） |
+| 4/5 | `CMD_KERNEL_TARGET_DISCOVER` / `_LIST` | 发现/列出设备 |
+| 1001 | `CMD_UNITY_EXECUTE` | 一次性命令（shell 等） |
+| 1200 | `CMD_UNITY_EXECUTE_EX` | 需 shell 特性位 |
+| 2000/2001 | `CMD_SHELL_INIT` / `_DATA` | 交互式 shell |
+| **5000** | `CMD_HEARTBEAT_MSG` | **心跳，即之前一直看到的那些帧** ✅ |
+
+### 心跳报文（`session.h`）
+
+```c
+struct HeartbeatMsg { uint64_t heartbeatCount; string reserved; };
+```
+
+对照实测 `08 86 01 12 00` → f1=134（varint）、f2="" —— 完全吻合。
+之前被误读为"小端计数器"的现象，本质是 **protobuf varint 的低字节在前**。
+
+### 另外两条能解释现象的常量（`define.h`）
+
+- `HEARTBEAT_INTERVAL = 5000`（5 秒心跳，与观察到的周期性一致）
+- `NEW_SESSION_DROP_USB_DATA_TIME_MAX_MS = 1000`
+  → 新会话开始时设备会丢弃 1 秒内的 USB 数据。这解释了"`UB.sid=0` 变体当时一个包都收不到"。
+
+---
+
 ## 与 ADB 路线的关系
 
 两条路互不干扰：`DeviceClient` 接口相同（connect / shell / screenshot / close），按 USB VID+PID 与探测结果选择实现。华为设备可能跑 Android（走 ADB，已实机验证 TNY-AL00）也可能跑 HarmonyOS（走 HDC），**不能只按 VID 判断**——按 VID 判断会把用户这台机器错误地挡掉。
