@@ -249,3 +249,19 @@ struct HeartbeatMsg { uint64_t heartbeatCount; string reserved; };
 ## 与 ADB 路线的关系
 
 两条路互不干扰：`DeviceClient` 接口相同（connect / shell / screenshot / close），按 USB VID+PID 与探测结果选择实现。华为设备可能跑 Android（走 ADB，已实机验证 TNY-AL00）也可能跑 HarmonyOS（走 HDC），**不能只按 VID 判断**——按 VID 判断会把用户这台机器错误地挡掉。
+
+## 第四轮前的事实修正（2026-11-20 夜）
+
+上一轮结论「daemon 根本没在读 EP 0x01」**被其自身实验反证**：
+
+> 发 `USBHead(option=USB_OPTION_RESET=2, dataSize=0)` 后设备心跳立即停止。
+
+daemon 若不在读 OUT，不可能响应 RESET。因此：
+
+- daemon **在读** EP `0x01`，且**正确解析** `USBHead`；
+- 卡点在 `USBHead` 之后的处理，或"RESET 后如何建立新会话"；
+- 已验证 `RESET` 不重启设备，仅清会话；之后 `hdc list targets` 会短暂 `[Empty]`，
+  重新 `list targets` 即恢复。
+
+下一轮两件事：① RESET 优先的会话重建序列（`tools/hdc_probe3.py`）；
+② 读**设备侧 hilog** 里 hdcd 的日志——让设备自己说出拒绝原因，胜过继续猜帧。
