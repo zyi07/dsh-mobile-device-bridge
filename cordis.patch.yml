@@ -1,0 +1,9 @@
+# dsh-mobile-bridge bundle patch
+#
+# 插入本插件自己的行。必须包在 `- insert:` 下面；
+# 写成顶层 `- id: ...` 会被当作"覆盖已存在的行"，
+# 目标不存在时 Loader 会警告并跳过，等于什么都没装。
+
+- insert:
+    - id: mobile-bridge
+      name: dsh-mobile-bridge

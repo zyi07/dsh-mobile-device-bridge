@@ -1,0 +1,50 @@
+{
+  "name": "dsh-mobile-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Connect Android devices over WebUSB (ADB) from a settings page.",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "docs",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@types/react": "^18.3.0",
+    "react": "^18.3.1",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0",
+    "@yume-chan/adb": "^2.1.0",
+    "@yume-chan/adb-credential-web": "^2.1.0",
+    "@yume-chan/adb-daemon-webusb": "^2.1.0",
+    "@yume-chan/stream-extra": "^2.1.0"
+  },
+  "scripts": {
+    "build": "node build.mjs"
+  }
+}

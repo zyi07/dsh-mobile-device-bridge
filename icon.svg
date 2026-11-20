@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Mobile device over USB">
+  <rect x="6" y="4" width="30" height="50" rx="6" ry="6" fill="none" stroke="#3b5bdb" stroke-width="3"/>
+  <rect x="15" y="10" width="12" height="3" rx="1.5" fill="#3b5bdb"/>
+  <circle cx="21" cy="46" r="3" fill="#3b5bdb"/>
+  <path d="M36 30 h8" stroke="#3b5bdb" stroke-width="3" stroke-linecap="round"/>
+  <path d="M44 26 l6 4 -6 4 z" fill="#3b5bdb"/>
+  <rect x="50" y="27" width="7" height="6" rx="1.5" fill="#3b5bdb"/>
+  <rect x="57" y="29" width="3" height="2" fill="#3b5bdb"/>
+</svg>

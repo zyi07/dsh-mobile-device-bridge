@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Mobile device",
+    "description": "Connect an Android phone over WebUSB and run ADB commands from a settings section.",
+    "detail": "docs/DETAIL.md"
+  }
+}
