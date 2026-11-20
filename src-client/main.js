@@ -8,6 +8,18 @@ export const inject = ['slots', 'locale'];
 const NS = 'mobile-bridge';
 const h = React.createElement;
 
+/**
+ * 把 Tango / WebUSB 的英文异常翻译成可执行的下一步。
+ * 认不出来的原样返回，便于贴到 Console 里排查。
+ */
+export function friendly(raw, t) {
+  if (/already in use[d]? by another program/i.test(raw)) return t('errBusy');
+  if (/unable to claim interface|access denied|not allowed/i.test(raw)) return t('errDriver');
+  if (/no device selected|no device/i.test(raw)) return '';
+  if (/user gesture/i.test(raw)) return t('errGesture');
+  return '';
+}
+
 const CSS = `
 .mb-root { display: flex; flex-direction: column; gap: 14px; font-size: 13px; }
 .mb-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -99,7 +111,9 @@ function MobileBridgeSection(props) {
       setPhase('connected');
     } catch (e) {
       adbRef.current = null;
-      setError(String(e && e.message ? e.message : e));
+      const raw = String(e && e.message ? e.message : e);
+      const hint = friendly(raw, t);
+      setError(hint || raw);
       setPhase('idle');
     }
   }
@@ -232,6 +246,9 @@ export function apply(ctx) {
       stateConnected: '已连接',
       stateIdle: '未连接',
       noWebusb: '当前浏览器不支持 WebUSB。请使用 Chrome 或 Edge 打开本页面。',
+      errBusy: '手机已被另一个程序占用（这一步是浏览器拿到了 USB 设备，但接口被抢占）。\n请在你自己电脑上依次做：\n1) 关掉 adb 服务：adb kill-server（Windows 任务管理器里结束 adb.exe）\n2) 退出 Android Studio、scrcpy、华为 HiSuite、各类手机助手\n3) 拔掉数据线再插回去，保持屏幕解锁\n4) 回到这里重新点「连接设备」',
+      errDriver: '浏览器无法接管该 USB 接口，通常是手机在 Windows 上绑的是 MTP/厂商驱动而不是 WinUSB。\n请在电脑上安装 Google Android USB Driver，或在设备管理器里把该设备的驱动改为 WinUSB，然后重新插拔。',
+      errGesture: '浏览器要求由点击触发设备选择，请直接点「连接设备」按钮，不要通过脚本调用。',
       hint: '需要在手机上开启「USB 调试」，首次连接时手机会弹出授权提示。同一时刻只能有一个程序占用 USB，请先停掉本机的 adb server、Android Studio、scrcpy 等。',
     },
     en: {
@@ -248,6 +265,9 @@ export function apply(ctx) {
       stateConnected: 'Connected',
       stateIdle: 'Not connected',
       noWebusb: 'This browser has no WebUSB support. Open this page in Chrome or Edge.',
+      errBusy: 'The phone is held by another program: the browser reached the USB device but could not claim the interface.\nOn your own computer:\n1) stop the adb server: adb kill-server (or end adb.exe in Task Manager)\n2) quit Android Studio, scrcpy, HiSuite and phone-assistant tools\n3) unplug and replug the cable, keep the screen unlocked\n4) click "Connect device" again',
+      errDriver: 'The browser cannot take over this USB interface. On Windows the phone is usually bound to the MTP/vendor driver instead of WinUSB.\nInstall the Google Android USB Driver, or switch the device driver to WinUSB in Device Manager, then replug.',
+      errGesture: 'The browser requires a click to open the device chooser. Press the "Connect device" button directly.',
       hint: 'Enable USB debugging on the phone; the first connection asks for authorization on the device. Only one program can hold the USB interface, so stop the local adb server, Android Studio, and scrcpy first.',
     },
   }), 'mobile-bridge: locale');

@@ -40,3 +40,14 @@
 - curl 取 `/plugins/...` 返回 401，CLI 无法验证客户端资源下发。
 
 **已知限制：** 仅 Android/ADB；HarmonyOS 的 HDC 未实现；无服务端工具（USB 只能在浏览器侧）。
+
+## 2026-11-20 16:26 — 翻译 WebUSB 占用类报错
+
+用户实测已能看到「移动设备」栏，点连接后报
+`The device is already in used by another program`。
+核对来源：Tango `error.js` 的 `DeviceBusyError`，抛于 `claimInterface`（device.js:196），
+即浏览器已枚举并打开设备，仅接口被本机其他程序占用。
+
+改动：新增 `friendly()` 把三类英文异常映射为中文可执行步骤
+（busy / 驱动不匹配 / 缺用户手势），未识别的原样透出便于排查。
+离线验证：4 条样例映射正确，slot 注册仍为 1 条。
