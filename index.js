@@ -17,8 +17,11 @@
  * （实测报 cannot get property "webServer" without inject）。
  */
 
-const CHANNEL = '/mobile-bridge';
-const ROUTE_PREFIX = '/mobile-bridge';
+// 浏览器可达的 RPC 只有共享的 /api 通道（自定义 channel 不产生 HTTP 路由，
+// 实测 POST /mobile-bridge/poll 落到 fallback 返回 405），所以用 intercept。
+const API_CHANNEL = '/api';
+const EP_PREFIX = 'mobile-bridge';
+const ROUTE_PREFIX = '/mbridge';
 const BROWSER_STALE_MS = 8000;
 
 export function apply(ctx) {
@@ -161,15 +164,17 @@ export function apply(ctx) {
   });
 
   ctx.inject(['connection'], (connCtx) => {
-    connCtx.effect(() => connCtx.connection.rpc.handle(CHANNEL, async (endpoint, payload) => {
+    const owns = (endpoint) => endpoint === `${EP_PREFIX}/poll` || endpoint === `${EP_PREFIX}/result`;
+    connCtx.effect(() => connCtx.connection.rpc.intercept(API_CHANNEL, owns, async (endpoint, payload) => {
       const body = payload && typeof payload === 'object' ? payload : {};
       try {
-        if (endpoint === 'poll') {
+        // intercept 收到的 endpoint 可能带也可能不带通道前缀，统一按尾部判断
+        if (endpoint === `${EP_PREFIX}/poll` || endpoint === 'poll' || endpoint.endsWith('/poll')) {
           lastSeen = now();
           device = body.device || null;
           return okValue({ job: queue.shift() || null, deviceSeen: device });
         }
-        if (endpoint === 'result') {
+        if (endpoint === `${EP_PREFIX}/result` || endpoint === 'result' || endpoint.endsWith('/result')) {
           lastSeen = now();
           return okValue({ accepted: settle(body.id, body) });
         }

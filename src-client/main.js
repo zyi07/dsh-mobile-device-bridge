@@ -102,7 +102,9 @@ function toBase64(bytes) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const BRIDGE = '/mobile-bridge';
+// 浏览器可达的 RPC 只有共享 /api 通道；宿主用 intercept 接管这些端点。
+const BRIDGE = '/api';
+const EP = 'mobile-bridge';
 const POLL_INTERVAL_MS = 1500;
 
 /** 执行一条宿主派下来的任务。 */
@@ -137,7 +139,7 @@ function startBridge(connection) {
     while (!stopped) {
       const started = Date.now();
       try {
-        const res = await connection.rpc.call(BRIDGE, 'poll', {
+        const res = await connection.rpc.call(BRIDGE, EP + '/poll', {
           device: STATE.info
             ? { model: STATE.info.model, android: STATE.info.android, serial: STATE.info.serial }
             : null,
@@ -145,7 +147,7 @@ function startBridge(connection) {
         if (res && res.ok && res.value && res.value.job) {
           const job = res.value.job;
           const outcome = await runJob(job);
-          await connection.rpc.call(BRIDGE, 'result', Object.assign({ id: job.id }, outcome));
+          await connection.rpc.call(BRIDGE, EP + '/result', Object.assign({ id: job.id }, outcome));
         }
       } catch { /* 宿主还没注册通道 / 网络抖动：下一轮再试 */ }
       await sleep(Math.max(0, POLL_INTERVAL_MS - (Date.now() - started)));
