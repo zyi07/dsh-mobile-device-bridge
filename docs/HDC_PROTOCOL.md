@@ -92,6 +92,84 @@ banner[12]   "OHOS HDC" + NUL
 
 > 已知教训：另一份实现明确把 RSA 闭环标为"未实现、停止盲推"。盲推出来的"能跑"会被下一个人当成"已完成"，比写明未实现更危险。
 
+## 真机实测（2026-11-20，HUAWEI Mate 70 Pro+ / OpenHarmony 7.0.0.111 / API 26）
+
+数据来源：另一台机器上的执行 Agent 在**无管理员权限、无法安装 USBPcap** 的条件下，
+改用 DevEco 自带 `libusb_shared.dll` 直接 claim 设备读取，以及 `hdc.exe` 静态字符串 + server 日志。
+原始记录见 `report.md`（第 1/3/5 节）。
+
+### 已确认（硬件级）
+
+| 项 | 实测值 |
+|---|---|
+| 设备 | `PLA-AL10`（Mate 70 Pro+），VID:PID = **`12D1:1101`** |
+| 系统 | `OpenHarmony-7.0.0.111`，API **26** |
+| hdc | client `Ver: 3.2.0f`，daemon `Ver: 3.2.0f73c487f8b34a2ba5` |
+| HDC 接口 | interface **#0**，`class=0xFF / subclass=0x50 / protocol=0x01`（vendor-specific） |
+| 端点 | bulk **IN `0x81`**、bulk **OUT `0x01`**，`wMaxPacketSize=512`，`bInterval=0` |
+| 设备驱动 | 绑定 **WINUSB**（`winusb.inf`） |
+| 另一接口 | #1 = MTP/PTP（`0x82` interrupt、`0x83`/`0x02` bulk），与 HDC 无关 |
+
+### 帧公式已在真机字节上验证
+
+设备实际发出（bulk IN 24 字节）：
+
+```
+48 57 00 00 01 00 09 00 00 00 04  08 00 10 88 27 18 00 20 09  08 1E 12 00
+└─ "HW" ·· ver  head=9   data=4 ┘ └──── 会话头 9 字节 ─────┘ └─ 负载 4 ─┘
+```
+
+解码结果：`headSize=9`、`dataSize=4`、`channelId=0`、`commandFlag=**5000**`、`checkSum=0`、`vCode=9`、
+负载 `{1: 30, 2: 空}`。`11 + 9 + 4 = 24`，与实到字节数一致。
+
+- `commandFlag=5000` + 递增计数 → 判定为**心跳**（hdc 日志里 `enablesupportfeatures: heartbeat,...` 佐证）
+- 负载字段 1 在会话内单调 +1（`0x1E → 0x1F → 0x20`），跨会话重置 → 心跳序号
+
+### 新发现：USB 传输层还有一层 `UB` 包头（手册未涵盖）
+
+每个 HDC 帧前面还有 11 字节：
+
+```
+55 42 | 01 | sessionId(4, BE) | payloadLength(4, BE)
+"UB"    ver   每会话变化/会话内恒定    恒等于紧随帧的字节数
+```
+
+三次独立会话的 `sessionId` 分别为 `82245E70` / `A791A61C` / `09EBAEF9`；
+`payloadLength` 三次都精确等于随后 24 字节帧，`0x18 = 24`。
+
+> `UB` 的语义名未在源码核实（可能是 USB 缩写）；但"它是长度前缀"有强证据。
+> 因此 USB 上的读取流程是：**读 11 字节 → 取长度 → 读该长度的帧 → 解 `HW` 帧**。
+
+### 鉴权（重要修正）
+
+日志原文：
+
+```
+WorkThreadStartSession ... auth 0 send handshake hs: OHOS HDC
+daemon auth type is rsa_3072_sha512 for ... session
+load pubkey from file(...pub) success / Get pubkey info success / send pubkey over
+Session handshake successful connType:0
+load prikey success / sign success / response auth signture success
+```
+
+- **算法 = RSA-3072 + SHA-512**（`rsa_3072_sha512`）→ 签名应为 384 字节
+- **已授权（`auth 0`）状态下，公钥下发与签名仍然发生**。
+  即"撤销授权"只影响"设备侧挑战 → 弹窗确认"那条分支，**AUTH 主体流量不依赖撤销授权也能采到**。
+  这一条推翻了本手册原先的假设，复抓时不必撤销授权。
+- 握手字段名（日志级）：`banner / sessionId / authType / connectKey / version`，
+  附加 `buf` 内：`emgmsg / devname / daemonauthstatus / 1200 / enablesupportfeatures`
+
+### 仍然缺的三项（只能靠主动探测或抓包）
+
+1. `SessionHandShake` 与 AUTH 交换的**实际字节**（公钥长度/开头、签名长度、字段编号与名字的对应）
+2. 大块传输（如截图）是否被拆成 512 字节整倍数
+3. 44 / 108 两种握手长度在本机属于哪种（USB 上可能根本不用 `ChannelHandShake`，那是 TCP 载体用的）
+
+补这三项的工具：`tools/hdc_probe.py` —— 用 libusb 直接当客户端去握手并记录双向字节，
+**不需要管理员权限与抓包驱动**（因为 `hdc kill` 后 `claim_interface(0)` 普通权限即成功，已实测）。
+
+---
+
 ## 与 ADB 路线的关系
 
 两条路互不干扰：`DeviceClient` 接口相同（connect / shell / screenshot / close），按 USB VID+PID 与探测结果选择实现。华为设备可能跑 Android（走 ADB，已实机验证 TNY-AL00）也可能跑 HarmonyOS（走 HDC），**不能只按 VID 判断**——按 VID 判断会把用户这台机器错误地挡掉。

@@ -239,3 +239,64 @@ export function encodeHandshake44({ connectKey = '' }) {
   out.set(utf8.encode(connectKey).slice(0, 32), 12);
   return out;
 }
+// ------------------------------------------------------- USB 传输层包头
+
+/**
+ * USB 层包头（11 字节），实测存在于设备→主机的 bulk IN 流上：
+ *   55 42 | 01 | sessionId(4) | payloadLength(4, BE)
+ * 即每个 HDC 帧前面还有一层 "UB" 包头，长度字段等于紧随其后的帧字节数。
+ *
+ * 依据（真机 libusb 直读，3/3 会话一致）：
+ *   55 42 01 09 EB AE F9 00 00 00 18  后紧跟正好 24 字节的 "HW" 帧。
+ * sessionId 每会话变化、会话内恒定；payloadLength 与下一包长度精确相等。
+ *
+ * ⚠️ magic 语义未在源码中核实（"UB" 可能是 USB 的缩写），但长度字段的
+ * 自洽性使"它是长度前缀"这一解释有强证据；字段命名待抓包/源码确认。
+ */
+export const USB_HEAD_SIZE = 11;
+export const USB_MAGIC = [0x55, 0x42];
+
+export function encodeUsbHead({ sessionId = 0, length, version = 0x01 }) {
+  const out = new Uint8Array(USB_HEAD_SIZE);
+  out[0] = USB_MAGIC[0];
+  out[1] = USB_MAGIC[1];
+  out[2] = version & 0xff;
+  new DataView(out.buffer).setUint32(3, sessionId >>> 0, false);
+  new DataView(out.buffer).setUint32(7, length >>> 0, false);
+  return out;
+}
+
+export function decodeUsbHead(input) {
+  const b = input instanceof Uint8Array ? input : new Uint8Array(input);
+  if (b.length < USB_HEAD_SIZE) throw new RangeError(`USB 包头太短: ${b.length}`);
+  if (b[0] !== USB_MAGIC[0] || b[1] !== USB_MAGIC[1]) {
+    throw new Error(`USB 包头 magic 不是 "UB": ${b[0].toString(16)} ${b[1].toString(16)}`);
+  }
+  const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  return {
+    version: b[2],
+    sessionId: view.getUint32(3, false),
+    payloadLength: view.getUint32(7, false),
+  };
+}
+
+/**
+ * 把 USB 字节流切成 [UB 包头][帧] 对。用于 bulk 读取时判断"够不够一整个包"。
+ * 返回 rest 为尚未到齐的尾巴。
+ */
+export function splitUsbPackets(buffer) {
+  const b = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const packets = [];
+  let pos = 0;
+  while (b.length - pos >= USB_HEAD_SIZE) {
+    const head = decodeUsbHead(b.slice(pos, pos + USB_HEAD_SIZE));
+    const need = USB_HEAD_SIZE + head.payloadLength;
+    if (b.length - pos < need) break;
+    packets.push({
+      head,
+      frame: b.slice(pos + USB_HEAD_SIZE, pos + need),
+    });
+    pos += need;
+  }
+  return { packets, rest: b.slice(pos) };
+}

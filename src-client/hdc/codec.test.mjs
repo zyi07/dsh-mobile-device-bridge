@@ -73,3 +73,56 @@ for (const n of [0, 1, 127, 128, 300, 287449388, 2 ** 32 - 1]) {
 }
 
 console.log('全部断言通过：帧解码 / 重编码逐字节一致 / 108 握手 / 粘包切分 / 半包 / 魔数校验 / varint');
+
+// ================= 真机字节（libusb 直读，HUAWEI Mate 70 Pro+） =================
+{
+  // 设备发来的 USB 包：11 字节 UB 包头 + 24 字节 HW 帧
+  const ub = hex('55 42 01 09 EB AE F9 00 00 00 18');
+  const hw = hex('48 57 00 00 01 00 09 00 00 00 04 08 00 10 88 27 18 00 20 09 08 1E 12 00');
+
+  const head = C.decodeUsbHead(ub);
+  assert.equal(head.version, 1);
+  assert.equal(head.sessionId, 0x09ebaef9);
+  assert.equal(head.payloadLength, 24, 'UB 包头长度字段必须等于后续帧长度');
+  assert.equal(head.payloadLength, hw.length);
+
+  const f = C.decodeFrame(hw);
+  assert.equal(f.totalSize, hw.length, '11 + headSize + dataSize 必须等于实际帧长');
+  assert.equal(f.headSize, 9);
+  assert.equal(f.dataSize, 4);
+  assert.equal(f.vCode, 9);
+  assert.equal(f.channelId, 0);
+  assert.equal(f.commandFlag, 5000, '真机心跳命令号');
+  assert.equal(f.checkSum, 0);
+  assert.equal(C.decodeFields(f.payload)[1], 30);
+
+  // UB 头也要能重编码成同样的字节
+  assert.deepEqual([...C.encodeUsbHead({ sessionId: 0x09ebaef9, length: 24 })], [...ub]);
+
+  // 三次会话的 sessionId 都要往返一致
+  for (const sid of [0x82245e70, 0xa791a61c, 0x09ebaef9]) {
+    const enc = C.encodeUsbHead({ sessionId: sid, length: 24 });
+    assert.equal(C.decodeUsbHead(enc).sessionId, sid);
+  }
+
+  // 粘连：两个 USB 包一次到达
+  const two = new Uint8Array([...ub, ...hw, ...ub, ...hw]);
+  const split = C.splitUsbPackets(two);
+  assert.equal(split.packets.length, 2);
+  assert.equal(split.rest.length, 0);
+  assert.equal(split.packets[0].frame.length, 24);
+
+  // 半包：只有 UB 头 + 10 字节帧，应切不出来
+  const partial = C.splitUsbPackets(new Uint8Array([...ub, ...hw.slice(0, 10)]));
+  assert.equal(partial.packets.length, 0);
+  assert.equal(partial.rest.length, 21);
+
+  // 心跳计数递增：同会话下 payload 字段1 逐次 +1
+  for (let seq = 0; seq < 3; seq++) {
+    const h = new Uint8Array([...hw]);
+    h[21] = 0x1e + seq;
+    assert.equal(C.decodeFields(C.decodeFrame(h).payload)[1], 30 + seq);
+  }
+
+  console.log('真机字节断言通过：UB 包头 / 层长度自洽 / 三次会话 sessionId / 粘连 / 半包 / 心跳递增');
+}
