@@ -20,6 +20,77 @@ export function friendly(raw, t) {
   return '';
 }
 
+/**
+ * 连接状态放在模块作用域，而不是组件 state。
+ *
+ * 设置页关闭时这个 section 会被卸载；如果连接挂在组件里，卸载就等于
+ * 主动断开（之前的 bug）。放在模块里以后：关掉设置再打开、切到别的
+ * 设置页再切回来，都还是连着的。只有刷新页面才会真正断开，
+ * 那种情况交给挂载时的静默重连。
+ */
+const STATE = { adb: null, device: null, info: null, pending: null };
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', () => {
+    const adb = STATE.adb;
+    STATE.adb = null;
+    STATE.device = null;
+    STATE.info = null;
+    if (adb) { try { adb.close(); } catch { /* best effort */ } }
+  });
+}
+
+async function readInfo(adb, device) {
+  const prop = async (key) => { try { return await adb.getProp(key); } catch { return ''; } };
+  return {
+    serial: device.serial,
+    vendorId: device.raw.vendorId,
+    productId: device.raw.productId,
+    model: await prop('ro.product.model'),
+    android: await prop('ro.build.version.release'),
+  };
+}
+
+/** 建立连接并认证；成功后写入模块级 STATE。 */
+async function attach(device) {
+  const connection = await device.connect();
+  const credentialStore = new AdbWebCredentialStore('dsh-mobile-bridge');
+  const transport = await AdbDaemonTransport.authenticate({
+    serial: device.serial,
+    connection,
+    credentialStore,
+  });
+  const adb = new Adb(transport);
+  const info = await readInfo(adb, device);
+  STATE.adb = adb;
+  STATE.device = device;
+  STATE.info = info;
+  return info;
+}
+
+async function detach() {
+  const adb = STATE.adb;
+  STATE.adb = null;
+  STATE.device = null;
+  STATE.info = null;
+  if (adb) { try { await adb.close(); } catch { /* ignore */ } }
+}
+
+async function runShellText(adb, cmd) {
+  const sp = adb.subprocess.shellProtocol;
+  if (sp) {
+    const r = await sp.spawnWaitText(cmd);
+    return (
+      '$ ' + cmd + '\n' +
+      (r.stdout || '') +
+      (r.stderr ? '\n[stderr] ' + r.stderr : '') +
+      '\n[exit ' + r.exitCode + ']'
+    );
+  }
+  const text = await adb.subprocess.noneProtocol.spawnWaitText(cmd);
+  return '$ ' + cmd + '\n' + text;
+}
+
 const CSS = `
 .mb-root { display: flex; flex-direction: column; gap: 14px; font-size: 13px; }
 .mb-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -39,7 +110,7 @@ const CSS = `
 .mb-k { color: var(--dsw-alias-label-tertiary); }
 .mb-v { color: var(--dsw-alias-label-primary); word-break: break-all; }
 .mb-note { color: var(--dsw-alias-label-tertiary); line-height: 1.6; }
-.mb-err { color: var(--dsw-alias-label-error, #d9534f); white-space: pre-wrap; }
+.mb-err { color: var(--dsw-alias-label-error, #d9534f); white-space: pre-wrap; line-height: 1.6; }
 .mb-input {
   flex: 1; min-width: 220px; padding: 7px 10px; border-radius: 8px;
   border: 1px solid var(--dsw-alias-border-l2);
@@ -60,21 +131,37 @@ const CSS = `
 
 function MobileBridgeSection(props) {
   const t = props.t;
-  const [phase, setPhase] = React.useState('idle');
+  const [phase, setPhase] = React.useState(STATE.adb ? 'connected' : 'idle');
   const [error, setError] = React.useState('');
-  const [info, setInfo] = React.useState(null);
+  const [info, setInfo] = React.useState(STATE.info);
   const [cmd, setCmd] = React.useState('getprop ro.product.model');
   const [out, setOut] = React.useState('');
   const [busy, setBusy] = React.useState(false);
-  const adbRef = React.useRef(null);
-  const [usbSupported, setUsbSupported] = React.useState(
+  const [copied, setCopied] = React.useState(false);
+  const [usbSupported] = React.useState(
     typeof navigator !== 'undefined' && !!navigator.usb,
   );
 
-  React.useEffect(() => () => {
-    const adb = adbRef.current;
-    adbRef.current = null;
-    if (adb) { adb.close().catch(() => {}); }
+  // 挂载时：若模块里已有连接就复用；否则尝试静默重连（不需要用户手势，
+  // 之前授权过的设备可以用 getDevices() 取到）。
+  React.useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (STATE.adb) { return; }
+      const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
+      if (!manager) { return; }
+      setPhase('reconnecting');
+      try {
+        const devices = await manager.getDevices();
+        if (devices.length > 0 && !STATE.pending) {
+          STATE.pending = attach(devices[0]).finally(() => { STATE.pending = null; });
+          const next = await STATE.pending;
+          if (alive) { setInfo(next); setPhase('connected'); return; }
+        }
+      } catch { /* 静默失败：交回手动连接 */ }
+      if (alive) { setPhase('idle'); }
+    })();
+    return () => { alive = false; };  // 注意：这里不再断开连接
   }, []);
 
   async function connect() {
@@ -84,69 +171,43 @@ function MobileBridgeSection(props) {
       const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
       if (!manager) { throw new Error(t('noWebusb')); }
       const device = await manager.requestDevice();
-      if (!device) { setPhase('idle'); return; }
-
-      const connection = await device.connect();
-      const credentialStore = new AdbWebCredentialStore('dsh-mobile-bridge');
-      const transport = await AdbDaemonTransport.authenticate({
-        serial: device.serial,
-        connection,
-        credentialStore,
-      });
-      const adb = new Adb(transport);
-      adbRef.current = adb;
-
-      let model = '';
-      let android = '';
-      try { model = await adb.getProp('ro.product.model'); } catch { /* ignore */ }
-      try { android = await adb.getProp('ro.build.version.release'); } catch { /* ignore */ }
-
-      setInfo({
-        serial: device.serial,
-        vendorId: device.raw.vendorId,
-        productId: device.raw.productId,
-        model,
-        android,
-      });
+      if (!device) { setPhase(STATE.adb ? 'connected' : 'idle'); return; }
+      if (STATE.adb) { await detach(); }
+      const next = await attach(device);
+      setInfo(next);
       setPhase('connected');
     } catch (e) {
-      adbRef.current = null;
       const raw = String(e && e.message ? e.message : e);
-      const hint = friendly(raw, t);
-      setError(hint || raw);
-      setPhase('idle');
+      setError(friendly(raw, t) || raw);
+      setPhase(STATE.adb ? 'connected' : 'idle');
     }
   }
 
+  async function disconnect() {
+    await detach();
+    setInfo(null);
+    setOut('');
+    setPhase('idle');
+  }
+
   async function runShell() {
-    const adb = adbRef.current;
-    if (!adb) { return; }
+    const adb = STATE.adb;
+    if (!adb) { setPhase('idle'); return; }
     setBusy(true);
     setError('');
     try {
-      const sp = adb.subprocess.shellProtocol;
-      if (sp) {
-        const r = await sp.spawnWaitText(cmd);
-        setOut(
-          '$ ' + cmd + '\n' +
-          (r.stdout || '') +
-          (r.stderr ? '\n[stderr] ' + r.stderr : '') +
-          '\n[exit ' + r.exitCode + ']',
-        );
-      } else {
-        const text = await adb.subprocess.noneProtocol.spawnWaitText(cmd);
-        setOut('$ ' + cmd + '\n' + text);
-      }
+      setOut(await runShellText(adb, cmd));
     } catch (e) {
-      setError(String(e && e.message ? e.message : e));
+      const raw = String(e && e.message ? e.message : e);
+      setError(friendly(raw, t) || raw);
     } finally {
       setBusy(false);
     }
   }
 
   async function screenshot() {
-    const adb = adbRef.current;
-    if (!adb) { return; }
+    const adb = STATE.adb;
+    if (!adb) { setPhase('idle'); return; }
     setBusy(true);
     setError('');
     try {
@@ -154,20 +215,29 @@ function MobileBridgeSection(props) {
       const url = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
       window.open(url, '_blank');
     } catch (e) {
-      setError(String(e && e.message ? e.message : e));
+      const raw = String(e && e.message ? e.message : e);
+      setError(friendly(raw, t) || raw);
     } finally {
       setBusy(false);
     }
   }
 
-  async function disconnect() {
-    const adb = adbRef.current;
-    adbRef.current = null;
-    if (adb) { try { await adb.close(); } catch { /* ignore */ } }
-    setInfo(null);
-    setOut('');
-    setPhase('idle');
+  async function copyOut() {
+    try {
+      await navigator.clipboard.writeText(out);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setError(t('copyFailed'));
+    }
   }
+
+  const phaseLabel = {
+    idle: t('stateIdle'),
+    reconnecting: t('stateReconnecting'),
+    connecting: t('connecting'),
+    connected: t('stateConnected'),
+  }[phase] || t('stateIdle');
 
   const children = [
     h('style', { key: 's' }, CSS),
@@ -181,9 +251,13 @@ function MobileBridgeSection(props) {
       phase === 'connected'
         ? h('button', { key: 'd', className: 'mb-btn', onClick: disconnect }, t('disconnect'))
         : null,
-      h('span', { key: 'b', className: 'mb-badge' }, phase === 'connected' ? t('stateConnected') : t('stateIdle')),
+      h('span', { key: 'b', className: 'mb-badge' }, phaseLabel),
     ),
   ];
+
+  if (phase === 'reconnecting') {
+    children.push(h('div', { key: 'rc', className: 'mb-note' }, t('reconnectingHint')));
+  }
 
   if (!usbSupported) {
     children.push(h('div', { key: 'nu', className: 'mb-note' }, t('noWebusb')));
@@ -221,6 +295,9 @@ function MobileBridgeSection(props) {
     ));
 
     if (out) {
+      children.push(h('div', { key: 'oh', className: 'mb-row' },
+        h('button', { className: 'mb-btn', onClick: copyOut }, copied ? t('copied') : t('copy')),
+      ));
       children.push(h('pre', { key: 'o', className: 'mb-out' }, out));
     }
   }
@@ -239,17 +316,22 @@ export function apply(ctx) {
       disconnect: '断开',
       run: '执行',
       screenshot: '截图',
+      copy: '复制输出',
+      copied: '已复制',
+      copyFailed: '复制失败：浏览器拒绝了剪贴板写入，请手动选中输出复制。',
       model: '机型',
       android: 'Android',
       serial: '序列号',
       usbId: 'USB ID',
       stateConnected: '已连接',
       stateIdle: '未连接',
+      stateReconnecting: '正在恢复连接…',
+      reconnectingHint: '检测到之前授权过的设备，正在用已保存的 RSA 密钥自动重连，不需要再点按钮。',
       noWebusb: '当前浏览器不支持 WebUSB。请使用 Chrome 或 Edge 打开本页面。',
       errBusy: '手机已被另一个程序占用（这一步是浏览器拿到了 USB 设备，但接口被抢占）。\n请在你自己电脑上依次做：\n1) 关掉 adb 服务：adb kill-server（Windows 任务管理器里结束 adb.exe）\n2) 退出 Android Studio、scrcpy、华为 HiSuite、各类手机助手\n3) 拔掉数据线再插回去，保持屏幕解锁\n4) 回到这里重新点「连接设备」',
       errDriver: '浏览器无法接管该 USB 接口，通常是手机在 Windows 上绑的是 MTP/厂商驱动而不是 WinUSB。\n请在电脑上安装 Google Android USB Driver，或在设备管理器里把该设备的驱动改为 WinUSB，然后重新插拔。',
       errGesture: '浏览器要求由点击触发设备选择，请直接点「连接设备」按钮，不要通过脚本调用。',
-      hint: '需要在手机上开启「USB 调试」，首次连接时手机会弹出授权提示。同一时刻只能有一个程序占用 USB，请先停掉本机的 adb server、Android Studio、scrcpy 等。',
+      hint: '连接会跟着页面保留：关掉设置、切到别的页再回来都不用重连；刷新页面则会断开，之后会自动尝试恢复。需要在手机上开启「USB 调试」，首次连接时手机会弹出授权提示。同一时刻只能有一个程序占用 USB，请先停掉本机的 adb server、Android Studio、scrcpy 等。',
     },
     en: {
       nav: 'Mobile device',
@@ -258,17 +340,22 @@ export function apply(ctx) {
       disconnect: 'Disconnect',
       run: 'Run',
       screenshot: 'Screenshot',
+      copy: 'Copy output',
+      copied: 'Copied',
+      copyFailed: 'Copy failed: the browser refused clipboard access. Select the output and copy manually.',
       model: 'Model',
       android: 'Android',
       serial: 'Serial',
       usbId: 'USB ID',
       stateConnected: 'Connected',
       stateIdle: 'Not connected',
+      stateReconnecting: 'Restoring connection…',
+      reconnectingHint: 'A previously authorized device was found; reconnecting with the stored RSA key, no click needed.',
       noWebusb: 'This browser has no WebUSB support. Open this page in Chrome or Edge.',
       errBusy: 'The phone is held by another program: the browser reached the USB device but could not claim the interface.\nOn your own computer:\n1) stop the adb server: adb kill-server (or end adb.exe in Task Manager)\n2) quit Android Studio, scrcpy, HiSuite and phone-assistant tools\n3) unplug and replug the cable, keep the screen unlocked\n4) click "Connect device" again',
       errDriver: 'The browser cannot take over this USB interface. On Windows the phone is usually bound to the MTP/vendor driver instead of WinUSB.\nInstall the Google Android USB Driver, or switch the device driver to WinUSB in Device Manager, then replug.',
       errGesture: 'The browser requires a click to open the device chooser. Press the "Connect device" button directly.',
-      hint: 'Enable USB debugging on the phone; the first connection asks for authorization on the device. Only one program can hold the USB interface, so stop the local adb server, Android Studio, and scrcpy first.',
+      hint: 'The connection survives closing settings or switching tabs; a page refresh drops it and triggers an automatic restore attempt. Enable USB debugging on the phone; the first connection asks for authorization on the device. Only one program can hold the USB interface, so stop the local adb server, Android Studio, and scrcpy first.',
     },
   }), 'mobile-bridge: locale');
 

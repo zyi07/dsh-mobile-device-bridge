@@ -51,3 +51,29 @@
 改动：新增 `friendly()` 把三类英文异常映射为中文可执行步骤
 （busy / 驱动不匹配 / 缺用户手势），未识别的原样透出便于排查。
 离线验证：4 条样例映射正确，slot 注册仍为 1 条。
+
+## 2026-11-20 16:33 — 修复「关掉设置页就断开」
+
+**用户实测**：连接成功（TNY-AL00 / Android 10 / RPGGK20914000028 / USB 0x12d1:0x107e），
+但关掉设置再打开就回到未连接，必须重新点。
+
+**根因**：连接挂在组件 state + 卸载 `useEffect` 清理里 `adb.close()`，
+设置页 section 卸载 = 主动断开。
+
+**改动**：
+- 连接状态移到模块作用域 `STATE`，组件卸载不再断开。
+- 仅在 `window.pagehide`（离页/刷新）时关闭。
+- 挂载时若 STATE 为空，用 `manager.getDevices()` + 已存 RSA 密钥做**静默重连**
+  （不需要用户手势），覆盖刷新页面场景。
+- 新增「复制输出」按钮（此前答应过）。
+- 提示文案同步更新为「关设置/切页不重连，刷新才断开」。
+
+**已验证（离线执行 client.js）**：
+- slot 注册 1 条（settings.section / id mobile-bridge / order 32）、label 走 locale、inject 提供 t。
+- `pagehide` 监听 1 个；`adb.close()` 仅 2 处（pagehide 与 detach），组件卸载路径已无关闭。
+- `friendly()` 三条样例映射正确。
+
+**未验证**：关设置再打开 / 刷新后的真实重连行为，需用户在浏览器确认。
+
+**顺带发现**：TNY-AL00 是华为机型（VID 0x12d1）但跑 Android 10。
+旧版「华为 VID ⇒ HarmonyOS ⇒ 拒绝连接」的分支正好会挡住这台机器，重建版已无该判断。
