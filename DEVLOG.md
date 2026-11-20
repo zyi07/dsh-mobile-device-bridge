@@ -108,3 +108,22 @@
 
 **待验证**：浏览器刷新后 `browserAlive` 变 true、真机命令返回。
 **限制**：标签页被浏览器后台节流时轮询会变慢；只支持 Android/ADB。
+
+## 2026-11-20 17:02 — 桥接第二版：修通道 + 去顺序依赖 + 加诊断
+
+**实测否掉的假设**：自定义 `rpc.handle('/mobile-bridge')` 不产生浏览器可达的 HTTP 路由。
+证据：`POST /mobile-bridge/poll` 与 `POST /zzz/poll` 同为 **405**（落在 SPA fallback），
+而 `POST /api/goals/create` 为 **401**（存在、需鉴权）。→ 改用
+`connection.rpc.intercept('/api', ...)`，端点 `mobile-bridge/{poll,result}`。
+
+**另一处自我造成的故障**：本地 CLI 路由原本也挂在 `/mobile-bridge` 前缀，
+会先命中并因「仅 loopback」返回 403，把浏览器的 RPC 请求挡掉且被 catch 吞掉。
+→ CLI 路由迁到 `/mbridge`。
+
+**去掉顺序依赖**：`dsh.client.inject` 只影响加载次序；若本插件先 apply，
+`ctx.get('connection')` 当刻为 undefined 且之后不再重试。
+→ 改为每 800ms 等 connection 服务出现再启动桥。
+
+**加诊断**：模块级 `DIAG`（state/polls/lastOk/error/injected），
+面板底部显示一行「桥接 … · connection=… · 轮询 N 次 · 错误 …」，
+console 每 20 次失败打一次 warn。避免再次静默失败。

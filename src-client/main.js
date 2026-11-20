@@ -105,6 +105,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 浏览器可达的 RPC 只有共享 /api 通道；宿主用 intercept 接管这些端点。
 const BRIDGE = '/api';
 const EP = 'mobile-bridge';
+
+/** 桥接诊断：面板会显示，console 也会打，避免"静默失败"。 */
+const DIAG = { state: 'init', polls: 0, lastOk: 0, error: null, injected: null };
 const POLL_INTERVAL_MS = 1500;
 
 /** 执行一条宿主派下来的任务。 */
@@ -135,6 +138,7 @@ async function runJob(job) {
  */
 function startBridge(connection) {
   let stopped = false;
+  DIAG.state = 'polling';
   (async () => {
     while (!stopped) {
       const started = Date.now();
@@ -144,12 +148,20 @@ function startBridge(connection) {
             ? { model: STATE.info.model, android: STATE.info.android, serial: STATE.info.serial }
             : null,
         });
+        DIAG.polls += 1;
+        DIAG.lastOk = Date.now();
+        DIAG.error = null;
         if (res && res.ok && res.value && res.value.job) {
           const job = res.value.job;
           const outcome = await runJob(job);
           await connection.rpc.call(BRIDGE, EP + '/result', Object.assign({ id: job.id }, outcome));
         }
-      } catch { /* 宿主还没注册通道 / 网络抖动：下一轮再试 */ }
+      } catch (e) {
+        DIAG.error = String(e && e.message ? e.message : e);
+        if (DIAG.polls === 0 || DIAG.polls % 20 === 0) {
+          console.warn('[mobile-bridge] poll failed:', e);
+        }
+      }
       await sleep(Math.max(0, POLL_INTERVAL_MS - (Date.now() - started)));
     }
   })();
@@ -206,6 +218,12 @@ function MobileBridgeSection(props) {
   const [usbSupported] = React.useState(
     typeof navigator !== 'undefined' && !!navigator.usb,
   );
+  // 诊断心跳：DIAG 是模块级对象，没有它面板不会重渲染
+  const [, setTick] = React.useState(0);
+  React.useEffect(() => {
+    const id = setInterval(() => setTick((n) => n + 1), 2000);
+    return () => clearInterval(id);
+  }, []);
 
   // 挂载时：若模块里已有连接就复用；否则尝试静默重连（不需要用户手势，
   // 之前授权过的设备可以用 getDevices() 取到）。
@@ -367,6 +385,14 @@ function MobileBridgeSection(props) {
     }
   }
 
+  const diagText =
+    '桥接 ' + DIAG.state +
+    ' · connection=' + (DIAG.injected || '—') +
+    ' · 轮询 ' + DIAG.polls + ' 次' +
+    (DIAG.lastOk ? ' · 最近成功 ' + Math.max(0, Math.round((Date.now() - DIAG.lastOk) / 1000)) + 's 前' : '') +
+    (DIAG.error ? ' · 错误: ' + DIAG.error : '');
+  children.push(h('div', { key: 'diag', className: 'mb-note', style: { fontSize: '11.5px' } }, diagText));
+
   children.push(h('div', { key: 'n', className: 'mb-note' }, t('hint')));
 
   return h('div', { className: 'mb-root' }, children);
@@ -427,10 +453,39 @@ export function apply(ctx) {
   const t = ctx.locale.bind(NS);
 
   // 与宿主建立任务通道（不依赖 UI 是否挂载）
-  const connection = ctx.get('connection');
-  if (connection && connection.rpc && typeof connection.rpc.call === 'function') {
-    ctx.effect(() => startBridge(connection), 'mobile-bridge: host bridge');
-  }
+  // 不依赖 dsh.client.inject 的加载顺序：connection 服务可能在我之后才 provide，
+  // 所以轮询等待它出现再启动桥（apply 期间拿不到就每 800ms 再试）。
+  ctx.effect(() => {
+    let cancelled = false;
+    let timer = null;
+    let stopBridge = null;
+
+    const attempt = () => {
+      if (cancelled || stopBridge) { return; }
+      let conn = null;
+      try { conn = ctx.get('connection'); } catch (e) {
+        DIAG.injected = 'throw: ' + String(e && e.message ? e.message : e);
+        DIAG.state = 'no-connection';
+        timer = setTimeout(attempt, 800);
+        return;
+      }
+      if (conn && conn.rpc && typeof conn.rpc.call === 'function') {
+        DIAG.injected = 'ok';
+        stopBridge = startBridge(conn);
+        return;
+      }
+      DIAG.injected = conn ? 'no-rpc' : 'waiting';
+      DIAG.state = 'waiting-connection';
+      timer = setTimeout(attempt, 800);
+    };
+
+    attempt();
+    return () => {
+      cancelled = true;
+      if (timer) { clearTimeout(timer); }
+      if (stopBridge) { stopBridge(); }
+    };
+  }, 'mobile-bridge: host bridge');
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
