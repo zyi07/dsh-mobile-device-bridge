@@ -6321,6 +6321,7 @@ class HdcSession {
       return await this.handshake({ resetFirst, resetSettleMs });
     } catch (e) {
       const msg = String(e && e.message ? e.message : e);
+      if (e && e.code === 'NEED_CONFIRM') { throw e; }   // 上机确认超时：重试无意义
       if (!/等待应答|超时/.test(msg)) { throw e; }
       // 变体：不发 RESET，直接再握一次手。
       // 有些状态下 daemon 会因为刚被 RESET 而不再重建会话，直接握手反而能进
@@ -6353,8 +6354,8 @@ class HdcSession {
     let resendDone = false;
     let lastFrame = frame;         // 最后发出的握手帧（确认期间用于催应答）
     let lastNudge = 0;
-    let confirmDeadline = 0;      // 设备要求"上机确认"后的等待截止时间
-    const HARD_DEADLINE = Date.now() + 120000;
+    let confirmDeadline = 0;      // 设备要求"上机确认"后的等待截止时间（60 秒）
+    const HARD_DEADLINE = Date.now() + 75000;
 
     for (let guard = 0; guard < 60; guard++) {
       if (Date.now() > HARD_DEADLINE) { throw new Error('握手总超时（120 秒）'); }
@@ -6379,7 +6380,13 @@ class HdcSession {
           await this.t.writeFrame({ sessionId: this.sessionId, frame });
           continue;
         }
-        throw new Error(`握手超时（等待应答失败${confirmDeadline ? '，设备上可能还没点允许' : ''}）`);
+        {
+          const err = new Error(confirmDeadline
+            ? '等待设备确认超时：手机上没有出现授权弹窗，或没有点「允许」'
+            : '握手超时（等待应答失败）');
+          err.code = confirmDeadline ? 'NEED_CONFIRM' : 'TIMEOUT';
+          throw err;
+        }
       }
       if (pkt.head.option !== OPT_HEADER) { continue; }
 
@@ -6404,8 +6411,8 @@ class HdcSession {
       // 这不是失败：用户点允许后它还会发 token。继续等，并把提示打到面板。
       if (reply.authType === AUTH_OK && /UNAUTH|unauthorized|not set/i.test(bufText)) {
         if (!confirmDeadline) {
-          confirmDeadline = Date.now() + 90000;
-          this.t.emit('INFO', '★ 请在手机上点「允许 / 始终信任」，然后保持此页面不要关闭（最多等 90 秒）');
+          confirmDeadline = Date.now() + 60000;
+          this.t.emit('INFO', '★ 请在手机上点「允许 / 始终信任」，然后保持此页面不要关闭（最多等 60 秒）');
         }
         continue;
       }
@@ -6571,7 +6578,7 @@ function hexOf(bytes, limit = 256) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r46';
+const BUILD_TAG = 'r47';
 
 const inject = ['slots', 'locale'];
 
@@ -7147,6 +7154,21 @@ function MobileBridgeSection(props) {
 
   if (error) {
     children.push(h('div', { key: 'e', className: 'mb-err' }, error));
+  }
+
+  // 连接过程中实时显示日志与提示（直接从模块级 STATE.log 取，
+  // 不依赖回调注册，避免组件重挂载导致回调为 null 而看不到任何提示）
+  if (phase === 'connecting' && STATE.log && STATE.log.length) {
+    const needConfirm = STATE.log.some((l) => l.indexOf('请在手机上点') >= 0);
+    if (needConfirm) {
+      children.push(h('div', {
+        key: 'nc',
+        className: 'mb-err',
+        style: { marginTop: '6px' },
+      }, '📱 请在手机上点「允许 / 始终信任」，然后保持本页面不要关闭'));
+    }
+    const tail = STATE.log.slice(-40).join('\n');
+    children.push(h('pre', { key: 'live', className: 'mb-out' }, tail));
   }
 
   if (info) {

@@ -6,7 +6,7 @@ import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
 import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION } from './hdc/session.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r46';
+const BUILD_TAG = 'r47';
 
 export const inject = ['slots', 'locale'];
 
@@ -582,6 +582,21 @@ function MobileBridgeSection(props) {
 
   if (error) {
     children.push(h('div', { key: 'e', className: 'mb-err' }, error));
+  }
+
+  // 连接过程中实时显示日志与提示（直接从模块级 STATE.log 取，
+  // 不依赖回调注册，避免组件重挂载导致回调为 null 而看不到任何提示）
+  if (phase === 'connecting' && STATE.log && STATE.log.length) {
+    const needConfirm = STATE.log.some((l) => l.indexOf('请在手机上点') >= 0);
+    if (needConfirm) {
+      children.push(h('div', {
+        key: 'nc',
+        className: 'mb-err',
+        style: { marginTop: '6px' },
+      }, '📱 请在手机上点「允许 / 始终信任」，然后保持本页面不要关闭'));
+    }
+    const tail = STATE.log.slice(-40).join('\n');
+    children.push(h('pre', { key: 'live', className: 'mb-out' }, tail));
   }
 
   if (info) {
