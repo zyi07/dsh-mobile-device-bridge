@@ -2,6 +2,8 @@ import React from 'react';
 import { Adb, AdbDaemonTransport } from '@yume-chan/adb';
 import { AdbDaemonWebUsbDeviceManager } from '@yume-chan/adb-daemon-webusb';
 import AdbWebCredentialStore from '@yume-chan/adb-credential-web';
+import { HdcTransport, HdcSession } from './hdc/transport.js';
+import { generateKeyPair as hdcGenerateKeyPair } from './hdc/session.js';
 
 export const inject = ['slots', 'locale'];
 
@@ -28,15 +30,26 @@ export function friendly(raw, t) {
  * 设置页再切回来，都还是连着的。只有刷新页面才会真正断开，
  * 那种情况交给挂载时的静默重连。
  */
-const STATE = { adb: null, device: null, info: null, pending: null };
+const STATE = {
+  adb: null,          // Android: Tango 的 Adb 实例
+  hdc: null,          // HarmonyOS: HdcSession 实例
+  device: null,       // 当前占用的 USBDevice
+  info: null,         // 面板展示用的设备信息
+  pending: null,      // 挂载时静默重连的进行中 Promise
+  kind: null,         // 'adb' | 'hdc'
+};
 
 if (typeof window !== 'undefined') {
   window.addEventListener('pagehide', () => {
     const adb = STATE.adb;
+    const hdc = STATE.hdc;
     STATE.adb = null;
+    STATE.hdc = null;
     STATE.device = null;
     STATE.info = null;
+    STATE.kind = null;
     if (adb) { try { adb.close(); } catch { /* best effort */ } }
+    if (hdc) { try { hdc.close(); } catch { /* best effort */ } }
   });
 }
 
@@ -70,10 +83,71 @@ async function attach(device) {
 
 async function detach() {
   const adb = STATE.adb;
+  const hdc = STATE.hdc;
   STATE.adb = null;
+  STATE.hdc = null;
   STATE.device = null;
   STATE.info = null;
+  STATE.kind = null;
   if (adb) { try { await adb.close(); } catch { /* ignore */ } }
+  if (hdc) { try { await hdc.close(); } catch { /* ignore */ } }
+}
+
+/**
+ * 连接 HarmonyOS 设备（HDC over WebUSB）。
+ *
+ * 与 Android 分支的关键差别：
+ *   · 不走 Tango，走自研 HdcTransport/HdcSession（协议来自真机抓包）
+ *   · 首次要现场生成 RSA-3072 密钥对并用它应答 daemon 的 AUTH
+ *   · 连上后先跑一条 param get 拿型号，作为面板展示信息
+ */
+async function connectHarmony(device) {
+  const t = new HdcTransport(device);
+  const keyPair = await hdcGenerateKeyPair();
+  const hostname = (typeof location !== 'undefined' && location.hostname) ? location.hostname : 'dsh-web';
+  const session = new HdcSession(t, {
+    serial: device.serialNumber || '',
+    hostname,
+    keyPair,
+  });
+  const authText = await session.connect();
+
+  let model = '';
+  let ohos = '';
+  try {
+    const r1 = await session.shell('param get const.product.model');
+    model = (r1.text || '').trim();
+  } catch { /* 拿不到不影响连接 */ }
+  try {
+    const r2 = await session.shell('param get const.ohos.apiversion');
+    ohos = (r2.text || '').trim();
+  } catch { /* ignore */ }
+
+  STATE.hdc = session;
+  STATE.device = device;
+  STATE.kind = 'hdc';
+  STATE.info = {
+    kind: 'hdc',
+    serial: device.serialNumber || '',
+    vendorId: device.vendorId,
+    productId: device.productId,
+    model,
+    os: ohos ? 'HarmonyOS (API ' + ohos + ')' : 'HarmonyOS',
+    auth: authText.split('\n').filter(Boolean).slice(-1)[0] || '',
+  };
+  return STATE.info;
+}
+
+/** 统一执行一条 shell 命令（ADB 或 HDC）。 */
+async function execShell(cmd) {
+  if (STATE.kind === 'hdc' && STATE.hdc) {
+    const r = await STATE.hdc.shell(cmd);
+    return '$ ' + cmd + '\n' + (r.text || '');
+  }
+  if (STATE.adb) {
+    return runShellText(STATE.adb, cmd);
+  }
+  throw new Error('未连接设备');
 }
 
 async function runShellText(adb, cmd) {
@@ -113,12 +187,15 @@ const POLL_INTERVAL_MS = 1500;
 /** 执行一条宿主派下来的任务。 */
 async function runJob(job) {
   const adb = STATE.adb;
-  if (!adb) { return { ok: false, error: '浏览器端尚未连接设备（请在设置页点「连接设备」）' }; }
+  if (!STATE.adb && !STATE.hdc) { return { ok: false, error: '浏览器端尚未连接设备（请在设置页点「连接设备」）' }; }
   try {
     if (job.kind === 'shell') {
-      return { ok: true, output: await runShellText(adb, job.data.cmd) };
+      return { ok: true, output: await execShell(job.data.cmd) };
     }
     if (job.kind === 'screenshot') {
+      if (STATE.kind === 'hdc') {
+        return { ok: false, error: 'HDC 通道暂不支持截图（需要文件传输，尚未实现）' };
+      }
       const bytes = await adb.subprocess.noneProtocol.spawnWait('screencap -p');
       if (bytes.length > 12 * 1024 * 1024) {
         return { ok: false, error: `截图过大（${bytes.length} 字节），未回传` };
@@ -208,10 +285,13 @@ const CSS = `
 
 function MobileBridgeSection(props) {
   const t = props.t;
-  const [phase, setPhase] = React.useState(STATE.adb ? 'connected' : 'idle');
+  const [phase, setPhase] = React.useState((STATE.adb || STATE.hdc) ? 'connected' : 'idle');
+  const [kind, setKind] = React.useState(STATE.kind || 'adb');
   const [error, setError] = React.useState('');
   const [info, setInfo] = React.useState(STATE.info);
-  const [cmd, setCmd] = React.useState('getprop ro.product.model');
+  const [cmd, setCmd] = React.useState(
+    (STATE.kind === 'hdc') ? 'param get const.product.model' : 'getprop ro.product.model',
+  );
   const [out, setOut] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [copied, setCopied] = React.useState(false);
@@ -230,7 +310,7 @@ function MobileBridgeSection(props) {
   React.useEffect(() => {
     let alive = true;
     (async () => {
-      if (STATE.adb) { return; }
+      if (STATE.adb || STATE.hdc) { return; }
       const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
       if (!manager) { return; }
       setPhase('reconnecting');
@@ -251,18 +331,31 @@ function MobileBridgeSection(props) {
     setError('');
     setPhase('connecting');
     try {
+      if (kind === 'hdc') {
+        // HarmonyOS：直接用 WebUSB 选设备（华为 VID），再走 HDC 协议
+        if (typeof navigator === 'undefined' || !navigator.usb) { throw new Error(t('noWebusb')); }
+        const device = await navigator.usb.requestDevice({ filters: [{ vendorId: 0x12d1 }] });
+        if (!device) { setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle'); return; }
+        if (STATE.adb || STATE.hdc) { await detach(); }
+        const next = await connectHarmony(device);
+        setInfo(next);
+        setCmd('param get const.product.model');
+        setPhase('connected');
+        return;
+      }
       const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
       if (!manager) { throw new Error(t('noWebusb')); }
       const device = await manager.requestDevice();
-      if (!device) { setPhase(STATE.adb ? 'connected' : 'idle'); return; }
-      if (STATE.adb) { await detach(); }
+      if (!device) { setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle'); return; }
+      if (STATE.adb || STATE.hdc) { await detach(); }
       const next = await attach(device);
       setInfo(next);
+      setCmd('getprop ro.product.model');
       setPhase('connected');
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
       setError(friendly(raw, t) || raw);
-      setPhase(STATE.adb ? 'connected' : 'idle');
+      setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle');
     }
   }
 
@@ -274,12 +367,11 @@ function MobileBridgeSection(props) {
   }
 
   async function runShell() {
-    const adb = STATE.adb;
-    if (!adb) { setPhase('idle'); return; }
+    if (!STATE.adb && !STATE.hdc) { setPhase('idle'); return; }
     setBusy(true);
     setError('');
     try {
-      setOut(await runShellText(adb, cmd));
+      setOut(await execShell(cmd));
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
       setError(friendly(raw, t) || raw);
@@ -289,6 +381,10 @@ function MobileBridgeSection(props) {
   }
 
   async function screenshot() {
+    if (STATE.kind === 'hdc') {
+      setError('HDC 通道暂不支持截图：鸿蒙截图需要 snapshot_display + 文件传输（file recv），尚未实现。可先用 hdc shell 执行命令。');
+      return;
+    }
     const adb = STATE.adb;
     if (!adb) { setPhase('idle'); return; }
     setBusy(true);
@@ -325,6 +421,19 @@ function MobileBridgeSection(props) {
   const children = [
     h('style', { key: 's' }, CSS),
     h('div', { key: 'row', className: 'mb-row' },
+      h('span', { key: 't0', className: 'mb-note' }, t('kindLabel')),
+      h('button', {
+        key: 'kadb',
+        className: 'mb-btn' + (kind === 'adb' ? ' mb-btn--primary' : ''),
+        disabled: !!STATE.adb || !!STATE.hdc,
+        onClick: () => { setKind('adb'); },
+      }, t('kindAdb')),
+      h('button', {
+        key: 'khdc',
+        className: 'mb-btn' + (kind === 'hdc' ? ' mb-btn--primary' : ''),
+        disabled: !!STATE.adb || !!STATE.hdc,
+        onClick: () => { setKind('hdc'); },
+      }, t('kindHdc')),
       h('button', {
         key: 'c',
         className: 'mb-btn mb-btn--primary',
@@ -355,8 +464,8 @@ function MobileBridgeSection(props) {
       h('div', { className: 'mb-kv' },
         h('span', { className: 'mb-k' }, t('model')),
         h('span', { className: 'mb-v' }, info.model || '—'),
-        h('span', { className: 'mb-k' }, t('android')),
-        h('span', { className: 'mb-v' }, info.android || '—'),
+        h('span', { className: 'mb-k' }, info.kind === 'hdc' ? t('os') : t('android')),
+        h('span', { className: 'mb-v' }, info.os || info.android || '—'),
         h('span', { className: 'mb-k' }, t('serial')),
         h('span', { className: 'mb-v' }, info.serial || '—'),
         h('span', { className: 'mb-k' }, t('usbId')),
@@ -410,6 +519,11 @@ export function apply(ctx) {
       copy: '复制输出',
       copied: '已复制',
       copyFailed: '复制失败：浏览器拒绝了剪贴板写入，请手动选中输出复制。',
+      os: '系统',
+      kindLabel: '设备类型',
+      kindAdb: 'Android',
+      kindHdc: 'HarmonyOS',
+      hdcHint: 'HarmonyOS 走 HDC 协议（WebUSB 直连），首次连接会在设备上弹出授权，全部完成后才会显示「已连接」。',
       model: '机型',
       android: 'Android',
       serial: '序列号',
@@ -434,6 +548,11 @@ export function apply(ctx) {
       copy: 'Copy output',
       copied: 'Copied',
       copyFailed: 'Copy failed: the browser refused clipboard access. Select the output and copy manually.',
+      os: 'OS',
+      kindLabel: 'Device type',
+      kindAdb: 'Android',
+      kindHdc: 'HarmonyOS',
+      hdcHint: 'HarmonyOS uses the HDC protocol over WebUSB. The device asks for authorization on first connect; the panel shows Connected only after it completes.',
       model: 'Model',
       android: 'Android',
       serial: 'Serial',

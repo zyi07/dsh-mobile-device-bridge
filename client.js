@@ -681,9 +681,9 @@ const u64 = number(8, (value, { buffer, index, littleEndian }) => {
 // This library can't use `@types/node` or `lib: dom`
 // because they will pollute the global scope
 // So `TextEncoder` and `TextDecoder` types are not available
-const { TextEncoder, TextDecoder } = globalThis;
-const SharedEncoder = /* #__PURE__ */ new TextEncoder();
-const SharedDecoder = /* #__PURE__ */ new TextDecoder();
+const { TextEncoder: TextEncoder$1, TextDecoder: TextDecoder$1 } = globalThis;
+const SharedEncoder = /* #__PURE__ */ new TextEncoder$1();
+const SharedDecoder = /* #__PURE__ */ new TextDecoder$1();
 /* #__NO_SIDE_EFFECTS__ */
 function encodeUtf8(input) {
     return SharedEncoder.encode(input);
@@ -5432,6 +5432,812 @@ class AdbWebCredentialStore {
     }
 }
 
+/**
+ * HDC 协议编解码（HarmonyOS Debug Connector）
+ *
+ * 依据 OpenHarmony 开源实现 developtools_hdc，不是猜测：
+ *   - 帧头 PayloadHead   src/common/session.h:160   （packed，11 字节）
+ *   - 握手 ChannelHandShake src/common/channel.h:36 （packed，108 = 44 + 64）
+ *
+ * 帧布局（实测字节数吻合）：
+ *   [11 字节 PayloadHead][headSize 字节 会话头 protobuf][dataSize 字节 会话负载]
+ *   总长 = 11 + headSize + dataSize
+ *
+ * 会话头是 protobuf：1=channelId 2=commandFlag 3=checkSum 4=vCode(=0x09)
+ * vCode 是魔数，对不上时对端静默丢包（不报错），所以必须精确。
+ *
+ * ⚠️ 版本差异：帧格式在 hdc 6.x（HarmonyOS NEXT）上有变化，另一份针对
+ * API 12+ 的实现观察到握手后是 [4 字节大端长度][payload]。本文件实现的是
+ * 源码里 PayloadHead 那一版；两种都留了入口，等真机抓包定版本。
+ */
+
+/** 会话头魔数，必须等于 0x09 */
+const VCODE = 0x09;
+/** PayloadHead 起头两个字节 "HW" */
+const FLAG_HW = [0x48, 0x57];
+const PROTOCOL_VER = 0x01;
+const HEAD_SIZE = 11;
+
+// ---------------------------------------------------------------- protobuf
+
+function encodeVarint(value) {
+  const out = [];
+  let v = value >>> 0;
+  if (value < 0) throw new RangeError('varint 不支持负数');
+  while (v >= 0x80) {
+    out.push((v & 0x7f) | 0x80);
+    v = Math.floor(v / 128);
+  }
+  out.push(v & 0x7f);
+  return out;
+}
+
+function decodeVarint(bytes, pos) {
+  let result = 0;
+  let shift = 1;
+  let i = pos;
+  for (;;) {
+    if (i >= bytes.length) throw new RangeError('varint 越界');
+    const b = bytes[i++];
+    result += (b & 0x7f) * shift;
+    if ((b & 0x80) === 0) break;
+    shift *= 128;
+    if (shift > 2 ** 53) throw new RangeError('varint 过长');
+  }
+  return { value: result, next: i };
+}
+
+new TextEncoder();
+new TextDecoder();
+
+function fieldVarint$1(num, value) {
+  return [...encodeVarint(num * 8), ...encodeVarint(value)];
+}
+
+/** 极简 protobuf 解析：只处理 varint 与 length-delimited，够 hdc 用。 */
+function decodeFields(bytes) {
+  const fields = {};
+  let pos = 0;
+  while (pos < bytes.length) {
+    const key = decodeVarint(bytes, pos);
+    pos = key.next;
+    const num = Math.floor(key.value / 8);
+    const wire = key.value % 8;
+    if (wire === 0) {
+      const v = decodeVarint(bytes, pos);
+      pos = v.next;
+      fields[num] = v.value;
+    } else if (wire === 2) {
+      const len = decodeVarint(bytes, pos);
+      pos = len.next;
+      fields[num] = bytes.slice(pos, pos + len.value);
+      pos += len.value;
+    } else {
+      throw new Error(`不支持的 protobuf wire type ${wire} (字段 ${num})`);
+    }
+  }
+  return fields;
+}
+
+// ------------------------------------------------------------ 会话头
+
+/** 会话头 protobuf：1=channelId 2=commandFlag 3=checkSum 4=vCode */
+function encodeSessionHead({ channelId, commandFlag, checkSum = 0, vCode = VCODE }) {
+  return [
+    ...fieldVarint$1(1, channelId),
+    ...fieldVarint$1(2, commandFlag),
+    ...fieldVarint$1(3, checkSum),
+    ...fieldVarint$1(4, vCode),
+  ];
+}
+
+// ------------------------------------------------------------ 帧
+
+function encodeFrame({ channelId, commandFlag, payload = [], checkSum = 0 }) {
+  const head = encodeSessionHead({ channelId, commandFlag, checkSum });
+  const data = [...payload];
+  const frame = [
+    ...FLAG_HW,
+    0x00, 0x00,
+    PROTOCOL_VER,
+    (head.length >> 8) & 0xff, head.length & 0xff,
+    (data.length >>> 24) & 0xff,
+    (data.length >>> 16) & 0xff,
+    (data.length >>> 8) & 0xff,
+    data.length & 0xff,
+    ...head,
+    ...data,
+  ];
+  return new Uint8Array(frame);
+}
+
+function decodeFrame(input) {
+  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+  if (bytes.length < HEAD_SIZE) throw new RangeError(`帧太短: ${bytes.length}`);
+  if (bytes[0] !== FLAG_HW[0] || bytes[1] !== FLAG_HW[1]) {
+    throw new Error(`帧标志不是 "HW": ${bytes[0].toString(16)} ${bytes[1].toString(16)}`);
+  }
+  const protocolVer = bytes[4];
+  const headSize = (bytes[5] << 8) | bytes[6];
+  const dataSize = ((bytes[7] << 24) >>> 0) + (bytes[8] << 16) + (bytes[9] << 8) + bytes[10];
+  const need = HEAD_SIZE + headSize + dataSize;
+  if (bytes.length < need) throw new RangeError(`帧不完整: 需要 ${need}，只有 ${bytes.length}`);
+
+  const headBytes = bytes.slice(HEAD_SIZE, HEAD_SIZE + headSize);
+  const payload = bytes.slice(HEAD_SIZE + headSize, need);
+  const head = decodeFields(headBytes);
+
+  // ⚠️ 负载**不一定是 protobuf**：
+  //   · 握手帧的负载是 protobuf（需要 fields）
+  //   · 命令帧的负载是纯文本（无 framing）
+  //   · 通道关闭帧的负载是 1 字节裸值 0x00/0x01
+  // 所以这里做容错解析，解不出就置 null，由调用方按 commandFlag 决定怎么读。
+  let payloadFields = null;
+  try {
+    payloadFields = decodeFields(payload);
+  } catch {
+    payloadFields = null;
+  }
+
+  return {
+    protocolVer,
+    headSize,
+    dataSize,
+    totalSize: need,
+    channelId: head[1],
+    commandFlag: head[2],
+    checkSum: head[3],
+    vCode: head[4],
+    payload,
+    fields: payloadFields,
+  };
+}
+
+/**
+ * HDC 会话层：握手（含 AUTH 六步）与命令通道
+ *
+ * 全部常量与结构来自**真机抓包逐字节核对**（2026-11-21，Mate 70 Pro+ /
+ * OpenHarmony 7.0.0.111 / API 26 / hdc client+daemon `Ver: 3.2.0f73c487f8b34a2ba5`），
+ * 原始帧见 ./fixtures.json。
+ *
+ * 与早期猜测的差异（已实证修正）：
+ *   · 会话 id 由**主机**随机生成，同时写入 USBHead.sessionId 与握手 f3
+ *   · 第一帧的 f5(buf) 不是空，而是一个 94 字节特征串
+ *   · 公钥放在 **f5(buf)**，不在 connectKey(4)；格式为 PEM，前面接
+ *     `<主机名>` + 一个 0x0C 分隔字节
+ *   · token 是 **20 个 ASCII 字符**
+ *   · 签名是 **512 字符 base64**（= 384 字节，RSA-3072 + SHA-512，PKCS#1 v1.5）
+ */
+
+
+/** 握手命令号：CMD_KERNEL_HANDSHAKE */
+const CMD_HANDSHAKE = 1;
+/** 一次性命令：CMD_UNITY_EXECUTE（shell / param get 等） */
+const CMD_UNITY_EXECUTE = 1001;
+/** 命令输出帧 */
+const CMD_OUTPUT = 10;
+/** 通道关闭：CMD_KERNEL_CHANNEL_CLOSE */
+const CMD_CHANNEL_CLOSE = 2;
+/** 心跳：CMD_HEARTBEAT_MSG */
+const CMD_HEARTBEAT = 5000;
+
+const AUTH_NONE = 0;
+const AUTH_SIGNATURE = 2;
+const AUTH_PUBLICKEY = 3;
+const AUTH_OK = 4;
+const AUTH_FAIL = 5;
+
+/** daemon 完整版本串（27 字节）；与本串不等会被断连 */
+const DAEMON_VERSION = 'Ver: 3.2.0f73c487f8b34a2ba5';
+
+/** 第一帧 f5：94 字节特征串（真机原文，空格不能改） */
+const FEATURE_STRING =
+  'authtype        1               1supportfeatures 29              Ver: 3.2.0f,USB,win,heartbeat';
+
+/** 主机名与 PEM 之间的分隔字节（真机为 0x0C） */
+const HOSTNAME_SEP = 0x0c;
+
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+// ---------------------------------------------------------------- 编解码
+
+/** 握手帧：channelId 恒 0，commandFlag 恒 1 */
+function buildHandshakeFrame({ sessionId, authType, connectKey = '', buf = '', version = DAEMON_VERSION }) {
+  const payload = encodeHandshakePayload({ authType, sessionId, connectKey, buf, version });
+  return encodeFrame({ channelId: 0, commandFlag: CMD_HANDSHAKE, payload });
+}
+
+function fieldVarint(num, value) {
+  const out = [];
+  let v = value >>> 0;
+  while (v >= 0x80) { out.push((v & 0x7f) | 0x80); v = Math.floor(v / 128); }
+  out.push(v & 0x7f);
+  return [num * 8, ...out];
+}
+
+function fieldBytes(num, bytes) {
+  const out = [num * 8 + 2];
+  let n = bytes.length;
+  while (n >= 0x80) { out.push((n & 0x7f) | 0x80); n = Math.floor(n / 128); }
+  out.push(n & 0x7f);
+  return [...out, ...bytes];
+}
+
+/**
+ * 握手负载。字段顺序以 session.h 的 struct SessionHandShake 为准：
+ *   1=banner 2=authType 3=sessionId 4=connectKey 5=buf 6=version
+ * `buf` 可以是字符串或 Uint8Array（公钥段含 0x0C 分隔字节，必须用 Uint8Array）。
+ */
+function encodeHandshakePayload({ authType, sessionId = 0, connectKey = '', buf = '', version = DAEMON_VERSION, banner = 'OHOS HDC' }) {
+  const toBytes = (v) => (v instanceof Uint8Array ? v : enc.encode(String(v)));
+  return new Uint8Array([
+    ...fieldBytes(1, enc.encode(banner)),
+    ...fieldVarint(2, authType),
+    ...fieldVarint(3, sessionId),
+    ...fieldBytes(4, toBytes(connectKey)),
+    ...fieldBytes(5, toBytes(buf)),
+    ...fieldBytes(6, enc.encode(version)),
+  ]);
+}
+
+/**
+ * 仅当这是握手帧（commandFlag=1）时才解析；心跳/输出/关闭等返回 null。
+ * 传输层必须用它来过滤，否则心跳会被误当成 authType=0 的握手应答。
+ */
+function tryParseHandshakeFrame(input) {
+  const f = decodeFrame(input);
+  if (f.commandFlag !== CMD_HANDSHAKE) { return null; }
+  const g = f.fields || {};
+  return {
+    commandFlag: f.commandFlag,
+    channelId: f.channelId,
+    authType: g[2] | 0,
+    sessionId: g[3] | 0,
+    connectKey: g[4] ? dec.decode(g[4]) : '',
+    buf: g[5] instanceof Uint8Array ? g[5] : new Uint8Array(0),
+    version: g[6] ? dec.decode(g[6]) : '',
+  };
+}
+
+// ---------------------------------------------------------------- 公钥 / 签名
+
+/** 把 WebCrypto 的 SPKI 公钥导出成 hdc 需要的 PEM 文本 */
+function spkiToPem(spki) {
+  const b64 = bytesToBase64(new Uint8Array(spki));
+  const lines = [];
+  for (let i = 0; i < b64.length; i += 64) { lines.push(b64.slice(i, i + 64)); }
+  return '-----BEGIN PUBLIC KEY-----\n' + lines.join('\n') + '\n-----END PUBLIC KEY-----\n';
+}
+
+/** 拼出 AUTH 阶段 f5：<主机名> + 0x0C + PEM */
+function buildPublicKeyBuf(hostname, pemText) {
+  const h = enc.encode(hostname);
+  const p = enc.encode(pemText);
+  const out = new Uint8Array(h.length + 1 + p.length);
+  out.set(h, 0);
+  out[h.length] = HOSTNAME_SEP;
+  out.set(p, h.length + 1);
+  return out;
+}
+
+/** 生成 RSA-3072 密钥对（算法与 daemon 要求的 rsa_3072_sha512 一致） */
+async function generateKeyPair() {
+  return crypto.subtle.generateKey(
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      modulusLength: 3072,
+      publicExponent: new Uint8Array([0x01, 0x00, 0x01]),
+      hash: 'SHA-512',
+    },
+    true,
+    ['sign', 'verify'],
+  );
+}
+
+/** 对 token 签名，返回 512 字符 base64（= 384 字节） */
+async function signToken(privateKey, token) {
+  const tk = token instanceof Uint8Array ? token : enc.encode(String(token));
+  const sig = await crypto.subtle.sign({ name: 'RSASSA-PKCS1-v1_5' }, privateKey, tk);
+  return bytesToBase64(new Uint8Array(sig));
+}
+
+function bytesToBase64(bytes) {
+  let s = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(s);
+}
+
+// ---------------------------------------------------------------- 六步状态机
+
+const STATES = {
+  IDLE: 'idle',
+  AWAIT_PUBKEY_REQUEST: 'await-pubkey-request',
+  AWAIT_TOKEN: 'await-token',
+  AWAIT_AUTH_OK: 'await-auth-ok',
+  AUTHORIZED: 'authorized',
+  FAILED: 'failed',
+};
+
+/**
+ * 握手状态机。只做"根据 daemon 的应答决定下一步"，不碰任何 I/O，
+ * 便于离线用真机字节回放验证。
+ *
+ * 用法：
+ *   const hs = new Handshake({ sessionId, serial, keyPair, hostname });
+ *   const first = await hs.start();            // 第 1 帧
+ *   // 收到 daemon 应答后：
+ *   const next = await hs.accept(parsedReply); // 第 3 或第 5 帧；null 表示已结束
+ */
+class Handshake {
+  constructor({ sessionId, serial, hostname, keyPair, version = DAEMON_VERSION }) {
+    if (!sessionId) { throw new Error('sessionId 必须由主机随机生成且非 0'); }
+    this.sessionId = sessionId >>> 0;
+    this.serial = serial;
+    this.hostname = hostname;
+    this.keyPair = keyPair || null;
+    this.version = version;
+    this.state = STATES.IDLE;
+    this.token = null;
+    this.pem = null;
+    this.lastReply = null;
+  }
+
+  /** 第 1 帧：authType=NONE，connectKey=序列号，buf=特征串 */
+  async start() {
+    if (this.state !== STATES.IDLE) { throw new Error(`start() 状态不对: ${this.state}`); }
+    if (this.keyPair) { this.pem = spkiToPem(await crypto.subtle.exportKey('spki', this.keyPair.publicKey)); }
+    this.state = STATES.AWAIT_PUBKEY_REQUEST;
+    return buildHandshakeFrame({
+      sessionId: this.sessionId,
+      authType: AUTH_NONE,
+      connectKey: this.serial,
+      buf: FEATURE_STRING,
+      version: this.version,
+    });
+  }
+
+  /**
+   * 喂一个 daemon 应答；返回下一帧或 null。
+   */
+  async accept(reply) {
+    this.lastReply = reply;
+    const authType = reply.authType | 0;
+
+    if (this.state === STATES.AWAIT_PUBKEY_REQUEST) {
+      if (authType === AUTH_PUBLICKEY) {
+        if (!this.pem) { throw new Error('daemon 索要公钥，但本机没有密钥对'); }
+        this.state = STATES.AWAIT_TOKEN;
+        return buildHandshakeFrame({
+          sessionId: 0,
+          authType: AUTH_PUBLICKEY,
+          buf: buildPublicKeyBuf(this.hostname, this.pem),
+          version: this.version,
+        });
+      }
+      if (authType === AUTH_OK) { this.state = STATES.AUTHORIZED; return null; }   // 设备已授权过
+      if (authType === AUTH_FAIL) { this.state = STATES.FAILED; throw new Error('daemon 拒绝握手'); }
+      throw new Error(`意外的 authType=${authType}（期望 3）`);
+    }
+
+    if (this.state === STATES.AWAIT_TOKEN) {
+      if (authType !== AUTH_SIGNATURE) { throw new Error(`意外的 authType=${authType}（期望 2）`); }
+      const buf = reply.buf || new Uint8Array(0);
+      if (buf.length !== 20) { throw new Error(`token 长度应为 20，实际 ${buf.length}`); }
+      this.token = buf;
+      this.state = STATES.AWAIT_AUTH_OK;
+      const sig = await signToken(this.keyPair.privateKey, buf);
+      return buildHandshakeFrame({
+        sessionId: 0,
+        authType: AUTH_SIGNATURE,
+        buf: sig,
+        version: this.version,
+      });
+    }
+
+    if (this.state === STATES.AWAIT_AUTH_OK) {
+      if (authType === AUTH_OK) {
+        const text = dec.decode(reply.buf || new Uint8Array(0));
+        if (!/SUCCESS/.test(text)) { throw new Error('AUTH_OK 但状态串不是 SUCCESS: ' + text); }
+        this.state = STATES.AUTHORIZED;
+        return null;
+      }
+      this.state = STATES.FAILED;
+      throw new Error(`授权失败，authType=${authType}`);
+    }
+
+    throw new Error(`状态 ${this.state} 下不接受应答`);
+  }
+}
+
+// ---------------------------------------------------------------- 命令通道
+
+/** 命令帧：channelId 非 0 随机值，负载就是命令文本（**不带 \0**） */
+function buildCommandFrame({ channelId, text }) {
+  if (!channelId) { throw new Error('命令帧 channelId 必须非 0'); }
+  return encodeFrame({
+    channelId: channelId >>> 0,
+    commandFlag: CMD_UNITY_EXECUTE,
+    payload: enc.encode(text),
+  });
+}
+
+/** 关闭通道：(host 发 0x00，device 回 0x01) */
+function buildCloseFrame({ channelId, side = 'host' }) {
+  return encodeFrame({
+    channelId: channelId >>> 0,
+    commandFlag: CMD_CHANNEL_CLOSE,
+    payload: new Uint8Array([side === 'host' ? 0x00 : 0x01]),
+  });
+}
+
+/** 心跳帧（双向，commandFlag=5000） */
+function buildHeartbeatFrame({ sessionId, count = 0 }) {
+  return encodeFrame({
+    channelId: 0,
+    commandFlag: CMD_HEARTBEAT,
+    payload: new Uint8Array([...fieldVarint(1, count), ...fieldBytes(2, [])]),
+  });
+}
+
+/**
+ * 解析命令应答。返回 { kind:'output'|'close'|'heartbeat'|'other', text? }
+ */
+function parseCommandReply(input) {
+  const f = decodeFrame(input);
+  if (f.commandFlag === CMD_OUTPUT) {
+    return { kind: 'output', text: dec.decode(f.payload) };
+  }
+  if (f.commandFlag === CMD_CHANNEL_CLOSE) {
+    return { kind: 'close', side: f.payload[0] === 0x01 ? 'device' : 'host' };
+  }
+  if (f.commandFlag === CMD_HEARTBEAT) {
+    return { kind: 'heartbeat' };
+  }
+  return { kind: 'other', commandFlag: f.commandFlag };
+}
+
+/**
+ * HDC over WebUSB —— 传输层与会话客户端
+ *
+ * 设计依据全部来自 2026-11-21 对**真 hdc.exe** 的抓包（见 ../docs/HDC_PROTOCOL.md
+ * 与 ./fixtures.json），要点：
+ *
+ *   · 接口：class 0xFF / subclass 0x50 / protocol 0x01；bulk IN 0x81、OUT 0x01
+ *   · 每个包前有 11 字节 USBHead{magic "UB", option, sessionId, dataSize}
+ *   · **UB 头与帧必须分两次 bulk 写**（合并写会被 daemon 当 softreset 丢弃）
+ *   · 连接建立先发 USBHead(option=2/RESET, size=0)，再发握手
+ *   · 握手六步见 session.js；会话 id 由主机随机生成且非 0
+ *   · 命令：commandFlag=1001，channelId 随机非 0，负载为纯文本（无 \0）
+ *   · 输出：commandFlag=10；结束：commandFlag=2（主机发 0x00，设备回 0x01）
+ *   · 心跳：双向，commandFlag=5000
+ *
+ * 本模块不直接依赖 navigator.usb，而是接受任意符合 WebUSB 形状的对象，
+ * 因此可以用假设备离线回放真机字节做测试（见 transport.test.mjs）。
+ */
+
+
+const OPT_HEADER = 1;
+const OPT_RESET = 2;
+const USB_HEAD_SIZE = 11;
+const MAGIC = [0x55, 0x42];
+/** HDC 接口标识（真机实测） */
+const IFACE_CLASS = 0xff;
+const IFACE_SUBCLASS = 0x50;
+const IFACE_PROTOCOL = 0x01;
+
+const sleep$1 = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 生成一个非 0 的 32 位随机 id */
+function randomId() {
+  let v = 0;
+  while (v === 0) {
+    const b = new Uint8Array(4);
+    crypto.getRandomValues(b);
+    v = ((b[0] << 24) >>> 0) + (b[1] << 16) + (b[2] << 8) + b[3];
+    v = v >>> 0;
+  }
+  return v;
+}
+
+function buildUsbHead({ sessionId, dataSize, option = OPT_HEADER }) {
+  const out = new Uint8Array(USB_HEAD_SIZE);
+  out[0] = MAGIC[0];
+  out[1] = MAGIC[1];
+  out[2] = option & 0xff;
+  new DataView(out.buffer).setUint32(3, sessionId >>> 0, false);
+  new DataView(out.buffer).setUint32(7, dataSize >>> 0, false);
+  return out;
+}
+
+function parseUsbHead(bytes) {
+  if (bytes.length < USB_HEAD_SIZE) { throw new RangeError('UB 头不足 11 字节'); }
+  if (bytes[0] !== MAGIC[0] || bytes[1] !== MAGIC[1]) {
+    throw new Error(`UB magic 不对: ${bytes[0].toString(16)} ${bytes[1].toString(16)}`);
+  }
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return {
+    option: bytes[2],
+    sessionId: dv.getUint32(3, false),
+    dataSize: dv.getUint32(7, false),
+  };
+}
+
+/** 在 WebUSB 设备里找 HDC 接口与该接口的两个 bulk 端点 */
+function findHdcInterface(device) {
+  const config = device.configuration;
+  if (!config) { throw new Error('设备未选择配置'); }
+  for (const iface of config.interfaces) {
+    for (const alt of [iface.alternate, ...(iface.alternates || [])]) {
+      if (
+        alt.interfaceClass === IFACE_CLASS &&
+        alt.interfaceSubclass === IFACE_SUBCLASS &&
+        alt.interfaceProtocol === IFACE_PROTOCOL
+      ) {
+        const eps = findBulkEndpoints(alt);
+        if (eps) { return { interfaceNumber: iface.interfaceNumber, ...eps }; }
+      }
+    }
+  }
+  // 退路：任何同时含 bulk IN/OUT 的 vendor-specific 接口
+  for (const iface of config.interfaces) {
+    const alt = iface.alternate;
+    if (alt.interfaceClass === IFACE_CLASS) {
+      const eps = findBulkEndpoints(alt);
+      if (eps) { return { interfaceNumber: iface.interfaceNumber, ...eps }; }
+    }
+  }
+  throw new Error('未找到 HDC 接口（class 0xFF/0x50/0x01）');
+}
+
+function findBulkEndpoints(alt) {
+  let epIn = 0;
+  let epOut = 0;
+  for (const ep of alt.endpoints || []) {
+    if (ep.type !== 'bulk') { continue; }
+    if (ep.direction === 'in') { epIn = ep.endpointNumber; }
+    if (ep.direction === 'out') { epOut = ep.endpointNumber; }
+  }
+  return epIn && epOut ? { endpointIn: epIn, endpointOut: epOut, packetSize: alt.endpoints[0]?.packetSize } : null;
+}
+
+/**
+ * 纯传输层：负责 open/claim、11 字节头与帧的分两次写、以及读侧重组。
+ * 不做任何协议语义。
+ */
+class HdcTransport {
+  constructor(device, { readChunk = 512 } = {}) {
+    this.device = device;
+    this.readChunk = readChunk;
+    this.iface = null;
+    this.rx = new Uint8Array(0);
+    this.opened = false;
+  }
+
+  static async requestDevice(usb, { vendorIds = [0x12d1] } = {}) {
+    const filters = vendorIds.map((vendorId) => ({ vendorId }));
+    const device = await usb.requestDevice({ filters });
+    return device;
+  }
+
+  async open() {
+    const d = this.device;
+    if (!d.opened) { await d.open(); }
+    if (d.configuration === null || d.configuration === undefined) {
+      const cfg = d.configurations && d.configurations[0];
+      if (!cfg) { throw new Error('设备没有配置'); }
+      await d.selectConfiguration(cfg.configurationValue);
+    }
+    this.iface = findHdcInterface(d);
+    await d.claimInterface(this.iface.interfaceNumber);
+    this.opened = true;
+    return this.iface;
+  }
+
+  /**
+   * 关键：**先写 11 字节 UB 头，再单独写帧**。
+   * 合并成一次写会被 daemon 当 softreset 把负载丢掉（真机日志实证）。
+   */
+  async writeFrame({ sessionId, frame, option = OPT_HEADER }) {
+    const head = buildUsbHead({ sessionId, dataSize: frame.length, option });
+    const r1 = await this.device.transferOut(this.iface.endpointOut, head);
+    if (r1.status !== 'ok' || r1.bytesWritten !== head.length) {
+      throw new Error(`写 UB 头失败: ${r1.status} ${r1.bytesWritten}/${head.length}`);
+    }
+    if (option === OPT_RESET) { return; }         // RESET 只有头，没有帧
+    const r2 = await this.device.transferOut(this.iface.endpointOut, frame);
+    if (r2.status !== 'ok' || r2.bytesWritten !== frame.length) {
+      throw new Error(`写帧失败: ${r2.status} ${r2.bytesWritten}/${frame.length}`);
+    }
+  }
+
+  async reset() {
+    await this.writeFrame({ sessionId: 0, frame: new Uint8Array(0), option: OPT_RESET });
+  }
+
+  /** 读一个完整包（UB 头 + 其声明的帧）。超时返回 null。 */
+  async readPacket({ timeoutMs = 3000 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const parsed = this.takeFromBuffer();
+      if (parsed) { return parsed; }
+
+      const remain = deadline - Date.now();
+      if (remain <= 0) { return null; }
+
+      const res = await Promise.race([
+        this.device.transferIn(this.iface.endpointIn, this.readChunk),
+        sleep$1(remain).then(() => ({ status: 'timeout' })),
+      ]);
+
+      if (res.status === 'timeout') { return null; }
+      if (res.status !== 'ok') {
+        if (res.status === 'stall') {
+          try { await this.device.clearHalt('in', this.iface.endpointIn); } catch { /* ignore */ }
+          continue;
+        }
+        throw new Error(`读失败: ${res.status}`);
+      }
+      if (res.data && res.data.byteLength > 0) {
+        this.append(new Uint8Array(res.data.buffer, res.data.byteOffset, res.data.byteLength));
+      }
+    }
+  }
+
+  append(chunk) {
+    const next = new Uint8Array(this.rx.length + chunk.length);
+    next.set(this.rx, 0);
+    next.set(chunk, this.rx.length);
+    this.rx = next;
+  }
+
+  takeFromBuffer() {
+    if (this.rx.length < USB_HEAD_SIZE) { return null; }
+    const head = parseUsbHead(this.rx.subarray(0, USB_HEAD_SIZE));
+    const need = USB_HEAD_SIZE + head.dataSize;
+    if (this.rx.length < need) { return null; }
+    const frame = this.rx.slice(USB_HEAD_SIZE, need);
+    this.rx = this.rx.slice(need);
+    return { head, frame };
+  }
+
+  async close() {
+    if (!this.opened) { return; }
+    try { await this.device.releaseInterface(this.iface.interfaceNumber); } catch { /* ignore */ }
+    try { await this.device.close(); } catch { /* ignore */ }
+    this.opened = false;
+  }
+}
+
+/**
+ * 协议客户端：连接（RESET → 六步握手）→ 执行命令。
+ */
+class HdcSession {
+  constructor(transport, { serial, hostname, version, keyPair, heartbeatMs = 5000, sessionId } = {}) {
+    this.t = transport;
+    this.serial = serial;
+    this.hostname = hostname || 'dsh-web';
+    this.version = version;
+    this.keyPair = keyPair || null;
+    this.heartbeatMs = heartbeatMs;
+    /** 允许外部指定（测试用；生产应留空由 randomId() 生成） */
+    this.fixedSessionId = (sessionId || 0) >>> 0;
+    this.sessionId = 0;
+    this.authorized = false;
+    this.hbTimer = null;
+    this.hbCount = 0;
+    this.info = null;
+  }
+
+  /** 建立连接并完成 AUTH。返回 daemon 的 AUTH_OK 状态文本。 */
+  async connect({ resetFirst = true, resetSettleMs = 150 } = {}) {
+    await this.t.open();
+    if (resetFirst) {
+      await this.t.reset();
+      await sleep$1(resetSettleMs);
+    }
+    this.sessionId = this.fixedSessionId || randomId();
+    const hs = new Handshake({
+      sessionId: this.sessionId,
+      serial: this.serial,
+      hostname: this.hostname,
+      keyPair: this.keyPair,
+      ...(this.version ? { version: this.version } : {}),
+    });
+
+    let frame = await hs.start();
+    await this.t.writeFrame({ sessionId: this.sessionId, frame });
+
+    for (let step = 0; step < 6; step++) {
+      const pkt = await this.t.readPacket({ timeoutMs: 5000 });
+      if (!pkt) { throw new Error(`握手超时（第 ${step + 1} 次等待应答）`); }
+      if (pkt.head.option !== OPT_HEADER) { continue; }
+      let reply;
+      try { reply = tryParseHandshakeFrame(pkt.frame); } catch { continue; }
+      if (!reply) { continue; }        // 心跳等非握手帧，跳过继续等
+      const next = await hs.accept(reply);
+      this.info = reply;
+      if (next === null) {
+        this.authorized = true;
+        break;
+      }
+      await this.t.writeFrame({ sessionId: hs.sessionId, frame: next });
+    }
+    if (!this.authorized) { throw new Error('握手未完成'); }
+    this.startHeartbeat();
+    return hs.lastReply ? decodeText(hs.lastReply.buf) : '';
+  }
+
+  startHeartbeat() {
+    if (!this.heartbeatMs || this.hbTimer) { return; }
+    this.hbTimer = setInterval(() => {
+      const frame = buildHeartbeatFrame({ sessionId: this.sessionId, count: this.hbCount++ });
+      this.t.writeFrame({ sessionId: this.sessionId, frame }).catch(() => { /* 心跳失败不致命 */ });
+    }, this.heartbeatMs);
+    if (this.hbTimer.unref) { this.hbTimer.unref(); }
+  }
+
+  stopHeartbeat() {
+    if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; }
+  }
+
+  /**
+   * 执行一条命令。返回 { text, codes }。
+   * 依据抓包：一条命令 = 1 个输出帧 + 1 个关闭帧。
+   */
+  async shell(text, { timeoutMs = 20000 } = {}) {
+    if (!this.authorized) { throw new Error('尚未完成 AUTH'); }
+    const channelId = randomId();
+    await this.t.writeFrame({
+      sessionId: this.sessionId,
+      frame: buildCommandFrame({ channelId, text }),
+    });
+
+    const deadline = Date.now() + timeoutMs;
+    let out = '';
+    try {
+      for (;;) {
+        const remain = deadline - Date.now();
+        if (remain <= 0) { throw new Error(`命令超时 ${timeoutMs}ms：${text}`); }
+        const pkt = await this.t.readPacket({ timeoutMs: Math.min(remain, 3000) });
+        if (!pkt) { throw new Error(`命令等待应答超时：${text}`); }
+        if (pkt.head.option !== OPT_HEADER) { continue; }
+        let f;
+        try { f = decodeFrame(pkt.frame); } catch { continue; }
+        if (f.commandFlag === 5000) { continue; }            // 心跳：忽略
+        const kind = parseCommandReply(pkt.frame);
+        if (kind.kind === 'output') { out += kind.text; continue; }
+        if (kind.kind === 'close') {
+          if (kind.side === 'device') { break; }
+          continue;
+        }
+        // 其他帧不认识的，忽略继续等
+      }
+    } finally {
+      // 主机侧也要发关闭（抓包里是 0x00）
+      try {
+        await this.t.writeFrame({
+          sessionId: this.sessionId,
+          frame: buildCloseFrame({ channelId, side: 'host' }),
+        });
+      } catch { /* ignore */ }
+    }
+    return { text: out };
+  }
+
+  async close() {
+    this.stopHeartbeat();
+    await this.t.close();
+  }
+}
+
+function decodeText(bytes) {
+  try { return new TextDecoder().decode(bytes); } catch { return ''; }
+}
+
 const inject = ['slots', 'locale'];
 
 const NS = 'mobile-bridge';
@@ -5457,15 +6263,26 @@ function friendly(raw, t) {
  * 设置页再切回来，都还是连着的。只有刷新页面才会真正断开，
  * 那种情况交给挂载时的静默重连。
  */
-const STATE = { adb: null, device: null, info: null, pending: null };
+const STATE = {
+  adb: null,          // Android: Tango 的 Adb 实例
+  hdc: null,          // HarmonyOS: HdcSession 实例
+  device: null,       // 当前占用的 USBDevice
+  info: null,         // 面板展示用的设备信息
+  pending: null,      // 挂载时静默重连的进行中 Promise
+  kind: null,         // 'adb' | 'hdc'
+};
 
 if (typeof window !== 'undefined') {
   window.addEventListener('pagehide', () => {
     const adb = STATE.adb;
+    const hdc = STATE.hdc;
     STATE.adb = null;
+    STATE.hdc = null;
     STATE.device = null;
     STATE.info = null;
+    STATE.kind = null;
     if (adb) { try { adb.close(); } catch { /* best effort */ } }
+    if (hdc) { try { hdc.close(); } catch { /* best effort */ } }
   });
 }
 
@@ -5499,10 +6316,71 @@ async function attach(device) {
 
 async function detach() {
   const adb = STATE.adb;
+  const hdc = STATE.hdc;
   STATE.adb = null;
+  STATE.hdc = null;
   STATE.device = null;
   STATE.info = null;
+  STATE.kind = null;
   if (adb) { try { await adb.close(); } catch { /* ignore */ } }
+  if (hdc) { try { await hdc.close(); } catch { /* ignore */ } }
+}
+
+/**
+ * 连接 HarmonyOS 设备（HDC over WebUSB）。
+ *
+ * 与 Android 分支的关键差别：
+ *   · 不走 Tango，走自研 HdcTransport/HdcSession（协议来自真机抓包）
+ *   · 首次要现场生成 RSA-3072 密钥对并用它应答 daemon 的 AUTH
+ *   · 连上后先跑一条 param get 拿型号，作为面板展示信息
+ */
+async function connectHarmony(device) {
+  const t = new HdcTransport(device);
+  const keyPair = await generateKeyPair();
+  const hostname = (typeof location !== 'undefined' && location.hostname) ? location.hostname : 'dsh-web';
+  const session = new HdcSession(t, {
+    serial: device.serialNumber || '',
+    hostname,
+    keyPair,
+  });
+  const authText = await session.connect();
+
+  let model = '';
+  let ohos = '';
+  try {
+    const r1 = await session.shell('param get const.product.model');
+    model = (r1.text || '').trim();
+  } catch { /* 拿不到不影响连接 */ }
+  try {
+    const r2 = await session.shell('param get const.ohos.apiversion');
+    ohos = (r2.text || '').trim();
+  } catch { /* ignore */ }
+
+  STATE.hdc = session;
+  STATE.device = device;
+  STATE.kind = 'hdc';
+  STATE.info = {
+    kind: 'hdc',
+    serial: device.serialNumber || '',
+    vendorId: device.vendorId,
+    productId: device.productId,
+    model,
+    os: ohos ? 'HarmonyOS (API ' + ohos + ')' : 'HarmonyOS',
+    auth: authText.split('\n').filter(Boolean).slice(-1)[0] || '',
+  };
+  return STATE.info;
+}
+
+/** 统一执行一条 shell 命令（ADB 或 HDC）。 */
+async function execShell(cmd) {
+  if (STATE.kind === 'hdc' && STATE.hdc) {
+    const r = await STATE.hdc.shell(cmd);
+    return '$ ' + cmd + '\n' + (r.text || '');
+  }
+  if (STATE.adb) {
+    return runShellText(STATE.adb, cmd);
+  }
+  throw new Error('未连接设备');
 }
 
 async function runShellText(adb, cmd) {
@@ -5542,12 +6420,15 @@ const POLL_INTERVAL_MS = 1500;
 /** 执行一条宿主派下来的任务。 */
 async function runJob(job) {
   const adb = STATE.adb;
-  if (!adb) { return { ok: false, error: '浏览器端尚未连接设备（请在设置页点「连接设备」）' }; }
+  if (!STATE.adb && !STATE.hdc) { return { ok: false, error: '浏览器端尚未连接设备（请在设置页点「连接设备」）' }; }
   try {
     if (job.kind === 'shell') {
-      return { ok: true, output: await runShellText(adb, job.data.cmd) };
+      return { ok: true, output: await execShell(job.data.cmd) };
     }
     if (job.kind === 'screenshot') {
+      if (STATE.kind === 'hdc') {
+        return { ok: false, error: 'HDC 通道暂不支持截图（需要文件传输，尚未实现）' };
+      }
       const bytes = await adb.subprocess.noneProtocol.spawnWait('screencap -p');
       if (bytes.length > 12 * 1024 * 1024) {
         return { ok: false, error: `截图过大（${bytes.length} 字节），未回传` };
@@ -5637,10 +6518,13 @@ const CSS = `
 
 function MobileBridgeSection(props) {
   const t = props.t;
-  const [phase, setPhase] = React.useState(STATE.adb ? 'connected' : 'idle');
+  const [phase, setPhase] = React.useState((STATE.adb || STATE.hdc) ? 'connected' : 'idle');
+  const [kind, setKind] = React.useState(STATE.kind || 'adb');
   const [error, setError] = React.useState('');
   const [info, setInfo] = React.useState(STATE.info);
-  const [cmd, setCmd] = React.useState('getprop ro.product.model');
+  const [cmd, setCmd] = React.useState(
+    (STATE.kind === 'hdc') ? 'param get const.product.model' : 'getprop ro.product.model',
+  );
   const [out, setOut] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [copied, setCopied] = React.useState(false);
@@ -5659,7 +6543,7 @@ function MobileBridgeSection(props) {
   React.useEffect(() => {
     let alive = true;
     (async () => {
-      if (STATE.adb) { return; }
+      if (STATE.adb || STATE.hdc) { return; }
       const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
       if (!manager) { return; }
       setPhase('reconnecting');
@@ -5680,18 +6564,31 @@ function MobileBridgeSection(props) {
     setError('');
     setPhase('connecting');
     try {
+      if (kind === 'hdc') {
+        // HarmonyOS：直接用 WebUSB 选设备（华为 VID），再走 HDC 协议
+        if (typeof navigator === 'undefined' || !navigator.usb) { throw new Error(t('noWebusb')); }
+        const device = await navigator.usb.requestDevice({ filters: [{ vendorId: 0x12d1 }] });
+        if (!device) { setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle'); return; }
+        if (STATE.adb || STATE.hdc) { await detach(); }
+        const next = await connectHarmony(device);
+        setInfo(next);
+        setCmd('param get const.product.model');
+        setPhase('connected');
+        return;
+      }
       const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
       if (!manager) { throw new Error(t('noWebusb')); }
       const device = await manager.requestDevice();
-      if (!device) { setPhase(STATE.adb ? 'connected' : 'idle'); return; }
-      if (STATE.adb) { await detach(); }
+      if (!device) { setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle'); return; }
+      if (STATE.adb || STATE.hdc) { await detach(); }
       const next = await attach(device);
       setInfo(next);
+      setCmd('getprop ro.product.model');
       setPhase('connected');
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
       setError(friendly(raw, t) || raw);
-      setPhase(STATE.adb ? 'connected' : 'idle');
+      setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle');
     }
   }
 
@@ -5703,12 +6600,11 @@ function MobileBridgeSection(props) {
   }
 
   async function runShell() {
-    const adb = STATE.adb;
-    if (!adb) { setPhase('idle'); return; }
+    if (!STATE.adb && !STATE.hdc) { setPhase('idle'); return; }
     setBusy(true);
     setError('');
     try {
-      setOut(await runShellText(adb, cmd));
+      setOut(await execShell(cmd));
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
       setError(friendly(raw, t) || raw);
@@ -5718,6 +6614,10 @@ function MobileBridgeSection(props) {
   }
 
   async function screenshot() {
+    if (STATE.kind === 'hdc') {
+      setError('HDC 通道暂不支持截图：鸿蒙截图需要 snapshot_display + 文件传输（file recv），尚未实现。可先用 hdc shell 执行命令。');
+      return;
+    }
     const adb = STATE.adb;
     if (!adb) { setPhase('idle'); return; }
     setBusy(true);
@@ -5754,6 +6654,19 @@ function MobileBridgeSection(props) {
   const children = [
     h('style', { key: 's' }, CSS),
     h('div', { key: 'row', className: 'mb-row' },
+      h('span', { key: 't0', className: 'mb-note' }, t('kindLabel')),
+      h('button', {
+        key: 'kadb',
+        className: 'mb-btn' + (kind === 'adb' ? ' mb-btn--primary' : ''),
+        disabled: !!STATE.adb || !!STATE.hdc,
+        onClick: () => { setKind('adb'); },
+      }, t('kindAdb')),
+      h('button', {
+        key: 'khdc',
+        className: 'mb-btn' + (kind === 'hdc' ? ' mb-btn--primary' : ''),
+        disabled: !!STATE.adb || !!STATE.hdc,
+        onClick: () => { setKind('hdc'); },
+      }, t('kindHdc')),
       h('button', {
         key: 'c',
         className: 'mb-btn mb-btn--primary',
@@ -5784,8 +6697,8 @@ function MobileBridgeSection(props) {
       h('div', { className: 'mb-kv' },
         h('span', { className: 'mb-k' }, t('model')),
         h('span', { className: 'mb-v' }, info.model || '—'),
-        h('span', { className: 'mb-k' }, t('android')),
-        h('span', { className: 'mb-v' }, info.android || '—'),
+        h('span', { className: 'mb-k' }, info.kind === 'hdc' ? t('os') : t('android')),
+        h('span', { className: 'mb-v' }, info.os || info.android || '—'),
         h('span', { className: 'mb-k' }, t('serial')),
         h('span', { className: 'mb-v' }, info.serial || '—'),
         h('span', { className: 'mb-k' }, t('usbId')),
@@ -5839,6 +6752,11 @@ function apply(ctx) {
       copy: '复制输出',
       copied: '已复制',
       copyFailed: '复制失败：浏览器拒绝了剪贴板写入，请手动选中输出复制。',
+      os: '系统',
+      kindLabel: '设备类型',
+      kindAdb: 'Android',
+      kindHdc: 'HarmonyOS',
+      hdcHint: 'HarmonyOS 走 HDC 协议（WebUSB 直连），首次连接会在设备上弹出授权，全部完成后才会显示「已连接」。',
       model: '机型',
       android: 'Android',
       serial: '序列号',
@@ -5863,6 +6781,11 @@ function apply(ctx) {
       copy: 'Copy output',
       copied: 'Copied',
       copyFailed: 'Copy failed: the browser refused clipboard access. Select the output and copy manually.',
+      os: 'OS',
+      kindLabel: 'Device type',
+      kindAdb: 'Android',
+      kindHdc: 'HarmonyOS',
+      hdcHint: 'HarmonyOS uses the HDC protocol over WebUSB. The device asks for authorization on first connect; the panel shows Connected only after it completes.',
       model: 'Model',
       android: 'Android',
       serial: 'Serial',

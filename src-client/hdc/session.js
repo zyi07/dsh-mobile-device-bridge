@@ -105,6 +105,25 @@ export function parseHandshakeFrame(input) {
   };
 }
 
+/**
+ * 仅当这是握手帧（commandFlag=1）时才解析；心跳/输出/关闭等返回 null。
+ * 传输层必须用它来过滤，否则心跳会被误当成 authType=0 的握手应答。
+ */
+export function tryParseHandshakeFrame(input) {
+  const f = decodeFrame(input);
+  if (f.commandFlag !== CMD_HANDSHAKE) { return null; }
+  const g = f.fields || {};
+  return {
+    commandFlag: f.commandFlag,
+    channelId: f.channelId,
+    authType: g[2] | 0,
+    sessionId: g[3] | 0,
+    connectKey: g[4] ? dec.decode(g[4]) : '',
+    buf: g[5] instanceof Uint8Array ? g[5] : new Uint8Array(0),
+    version: g[6] ? dec.decode(g[6]) : '',
+  };
+}
+
 // ---------------------------------------------------------------- 公钥 / 签名
 
 /** 把 WebCrypto 的 SPKI 公钥导出成 hdc 需要的 PEM 文本 */

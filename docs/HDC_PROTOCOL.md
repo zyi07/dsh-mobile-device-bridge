@@ -426,8 +426,29 @@ import 的 24 个 libusb 函数、替换 `bulk_transfer`/`submit_transfer` 等 4
   并解析 daemon 三个应答，再让状态机沿真实应答走完全程（WebCrypto 生成的签名恰为 384 字节）
 - `node session.test.mjs` → 全绿
 
-### 仍未做（剩下的是接线，不是协议）
+### 传输层与插件接线（已完成，2026-11-21 凌晨）
 
-1. `hdc/transport.js`：浏览器 WebUSB 打开设备 + 读写 `0x81/0x01` + 11B 头/帧分两次写
-2. 把 `HdcClient` 接到插件 UI 与宿主桥（与 `AdbClient` 同一 `DeviceClient` 接口）
-3. 真机端到端验证（bash 一条 `echo` + 截图）
+- `src-client/hdc/transport.js`
+  - `HdcTransport`：WebUSB 打开/claim、按 class `0xFF/0x50/0x01` 找接口、
+    **11B 头与帧分两次 `transferOut`**、`RESET(option=2)`、读侧按 UB 头重组、
+    STALL 时 `clearHalt`
+  - `HdcSession`：`connect()` 走 RESET → 六步 AUTH → 心跳；`shell(text)` 走
+    `flag=1001` 命令 + 收集 `flag=10` 输出 + `flag=2` 关闭
+- 插件 UI 增加「Android / HarmonyOS」类型开关；HDC 分支用现场生成的 RSA-3072 密钥
+  应答 AUTH，连上后用 `param get` 取机型与 API 版本展示
+- 宿主桥（`/mbridge/exec`）自动适配两种通道
+
+### 离线验证（无真机）
+
+- `hdc/fake-device.mjs`：假 WebUSB 设备，回放真机字节，**故意把 IN 切成 7 字节小包**
+  以压读取侧重组
+- `hdc/transport.test.mjs`：8 项全绿，含
+  「第一笔必须是 11B RESET 头」「头与帧不得合并成 191B 一次写」
+  「经完整路径发出的 step1 与真机逐字节一致」「命令输出 `shim_probe3\n`」
+
+### 仍未做
+
+1. **真机端到端**：在真机上点「HarmonyOS → 连接设备」，验证 AUTH 与 `shell`
+2. **HDC 截图**：需 `snapshot_display` + 文件传输（`file recv`），未实现
+3. **假设待验**：daemon 是否只校验"当场送的公钥 vs 当场送的签名"。
+   若它还要求公钥在已授权列表里，则需复用 hdc 的私钥（导入 PKCS#8）
