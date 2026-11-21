@@ -205,12 +205,13 @@ export const STATES = {
  *   const next = await hs.accept(parsedReply); // 第 3 或第 5 帧；null 表示已结束
  */
 export class Handshake {
-  constructor({ sessionId, serial, hostname, keyPair, version = DAEMON_VERSION }) {
+  constructor({ sessionId, serial, hostname, keyPair, publicKeyPem, version = DAEMON_VERSION }) {
     if (!sessionId) { throw new Error('sessionId 必须由主机随机生成且非 0'); }
     this.sessionId = sessionId >>> 0;
     this.serial = serial;
     this.hostname = hostname;
     this.keyPair = keyPair || null;
+    this.publicKeyPem = publicKeyPem || null;   // 复用已有密钥时直接给 PEM
     this.version = version;
     this.state = STATES.IDLE;
     this.token = null;
@@ -221,7 +222,8 @@ export class Handshake {
   /** 第 1 帧：authType=NONE，connectKey=序列号，buf=特征串 */
   async start() {
     if (this.state !== STATES.IDLE) { throw new Error(`start() 状态不对: ${this.state}`); }
-    if (this.keyPair) { this.pem = spkiToPem(await crypto.subtle.exportKey('spki', this.keyPair.publicKey)); }
+    if (this.publicKeyPem) { this.pem = this.publicKeyPem; }
+    else if (this.keyPair) { this.pem = spkiToPem(await crypto.subtle.exportKey('spki', this.keyPair.publicKey)); }
     this.state = STATES.AWAIT_PUBKEY_REQUEST;
     return buildHandshakeFrame({
       sessionId: this.sessionId,
@@ -341,4 +343,106 @@ export function parseCommandReply(input) {
     return { kind: 'heartbeat' };
   }
   return { kind: 'other', commandFlag: f.commandFlag };
+}
+// ---------------------------------------------------------------- 复用已有 HDC 密钥
+
+/** 从包含 PEM 的文本里取出指定类型的 base64 body */
+function extractPemBlock(text, label) {
+  const re = new RegExp('-----BEGIN ' + label + '-----([\\s\\S]*?)-----END ' + label + '-----');
+  const m = String(text || '').match(re);
+  return m ? m[1].replace(/[^A-Za-z0-9+/=]/g, '') : null;
+}
+
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) { out[i] = bin.charCodeAt(i); }
+  return out;
+}
+
+function bytesToPem(bytes, label) {
+  return spkiToPem(bytes).replace('PUBLIC KEY', label);
+}
+
+// ---- 极简 DER 解析：只够从 PKCS#8 的 RSAPrivateKey 里取出 n / e ----
+
+function derReadTlv(buf, pos) {
+  if (pos + 2 > buf.length) { throw new Error('DER 越界'); }
+  const tag = buf[pos];
+  let len = buf[pos + 1];
+  let off = pos + 2;
+  if (len & 0x80) {
+    const n = len & 0x7f;
+    len = 0;
+    for (let i = 0; i < n; i++) { len = (len << 8) | buf[off + i]; }
+    off += n;
+  }
+  return { tag, start: off, end: off + len, next: off + len };
+}
+
+function derChildren(buf, tlv) {
+  const out = [];
+  let pos = tlv.start;
+  while (pos < tlv.end) {
+    const c = derReadTlv(buf, pos);
+    out.push(c);
+    pos = c.next;
+  }
+  return out;
+}
+
+function derEncode(tag, content) {
+  const len = content.length;
+  let header;
+  if (len < 0x80) { header = [tag, len]; }
+  else if (len < 0x100) { header = [tag, 0x81, len]; }
+  else if (len < 0x10000) { header = [tag, 0x82, (len >> 8) & 0xff, len & 0xff]; }
+  else { header = [tag, 0x83, (len >> 16) & 0xff, (len >> 8) & 0xff, len & 0xff]; }
+  return new Uint8Array([...header, ...content]);
+}
+
+/** 从 PKCS#8 私钥 PEM 推导出 SPKI 公钥 PEM（WebCrypto 不支持直接从私钥导出公钥） */
+export function derivePublicKeyPem(pkcs8Pem) {
+  const b64 = extractPemBlock(pkcs8Pem, 'PRIVATE KEY');
+  if (!b64) { throw new Error('没找到 -----BEGIN PRIVATE KEY----- 块'); }
+  const der = b64ToBytes(b64);
+  const root = derReadTlv(der, 0);                       // PrivateKeyInfo
+  const top = derChildren(der, root);
+  // PrivateKeyInfo ::= SEQUENCE { version, AlgorithmIdentifier, OCTET STRING(privateKey) }
+  const octet = top.find((t) => t.tag === 0x04);
+  if (!octet) { throw new Error('PKCS#8 结构异常：缺少 privateKey OCTET STRING'); }
+  const inner = der.slice(octet.start, octet.end);
+  const rsa = derReadTlv(inner, 0);                      // RSAPrivateKey
+  const parts = derChildren(inner, rsa);
+  // RSAPrivateKey ::= SEQUENCE { version, n, e, d, p, q, ... }
+  if (parts.length < 3) { throw new Error('RSAPrivateKey 字段不足'); }
+  const n = inner.slice(parts[1].start, parts[1].end);
+  const e = inner.slice(parts[2].start, parts[2].end);
+  const rsaPub = derEncode(0x30, [...derEncode(0x02, n), ...derEncode(0x02, e)]);   // RSAPublicKey
+  const algId = new Uint8Array([0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86,
+    0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00]);                                       // rsaEncryption
+  const bitString = derEncode(0x03, [0x00, ...rsaPub]);
+  const spki = derEncode(0x30, [...algId, ...bitString]);
+  return spkiToPem(spki);
+}
+
+/**
+ * 导入 hdc 自己的 PKCS#8 私钥（那把已被设备信任的密钥），
+ * 返回 { privateKey, publicKeyPem }。公钥从私钥推导，或用文本里附带的 PUBLIC KEY 块。
+ */
+export async function importHdcKey(pemText) {
+  const pkcs8 = extractPemBlock(pemText, 'PRIVATE KEY');
+  if (!pkcs8) { throw new Error('未找到 PKCS#8 私钥（-----BEGIN PRIVATE KEY-----）'); }
+  const privateKey = await crypto.subtle.importKey(
+    'pkcs8',
+    b64ToBytes(pkcs8),
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-512' },
+    false,
+    ['sign'],
+  );
+  const pubBlock = extractPemBlock(pemText, 'PUBLIC KEY');
+  const publicKeyPem = pubBlock
+    ? bytesToPem(b64ToBytes(pubBlock), 'PUBLIC KEY')
+    : derivePublicKeyPem(pemText);
+  return { privateKey, publicKeyPem };
 }

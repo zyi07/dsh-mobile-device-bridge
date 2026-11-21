@@ -433,3 +433,27 @@ RX pkt len=451 → INFO ← 握手应答 authType=4(OK) buf=384B
 - 用户盯着手机看是否弹窗；7 轮都无弹窗则改走「复用 hdc 已授权私钥」路线
 ---
 
+
+## 2026-11-21 23:15 - 增加「复用 hdc 已授权私钥」路线（免除上机确认）
+
+**动机：** r47 那种运行里 daemon 直接不回握手（疑似记住了一次未授权提交、
+在用户确认前不再理会新握手），而手机又没弹窗 → 死锁。
+既然本机 hdc 能连上手机，说明**它的密钥已被设备信任**，复用它即可免确认。
+
+**做了什么：**
+- `session.js` 新增：
+  - `extractPemBlock()` / `b64ToBytes()` / `bytesToPem()`
+  - 极简 DER 解析（`derReadTlv` / `derChildren` / `derEncode`）
+  - `derivePublicKeyPem(pkcs8Pem)`：从 PKCS#8 私钥推导 SPKI 公钥 PEM
+    （WebCrypto 不支持从私钥导出公钥，只能自己算）
+  - `importHdcKey(pemText)`：导入 PKCS#8 私钥 + 得到公钥 PEM
+- `Handshake` 支持直接给 `publicKeyPem`（跳过现场生成）
+- 面板新增「已有 HDC 私钥（可选）」折叠区，粘贴即用；`STATE.hdcKeyText` 保存
+- 离线验证：生成 RSA-3072 → 导出 PKCS#8 → 用我们的推导函数还原公钥，
+  与 WebCrypto 的 SPKI 导出**逐字节一致**；导入后签名 384 字节且可验证
+- 构建标记 r49
+
+**待做什么：**
+- 用户粘贴 hdckey + hdckey.pub 后连接，应直接走 token → 签名 → AUTH_OK
+---
+

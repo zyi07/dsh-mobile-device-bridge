@@ -381,12 +381,13 @@ export class HdcTransport {
  * 协议客户端：连接（RESET → 六步握手）→ 执行命令。
  */
 export class HdcSession {
-  constructor(transport, { serial, hostname, version, keyPair, heartbeatMs = 5000, sessionId } = {}) {
+  constructor(transport, { serial, hostname, version, keyPair, publicKeyPem, heartbeatMs = 5000, sessionId } = {}) {
     this.t = transport;
     this.serial = serial;
     this.hostname = hostname || 'dsh-web';
     this.version = version;
     this.keyPair = keyPair || null;
+    this.publicKeyPem = publicKeyPem || null;
     this.heartbeatMs = heartbeatMs;
     /** 允许外部指定（测试用；生产应留空由 randomId() 生成） */
     this.fixedSessionId = (sessionId || 0) >>> 0;
@@ -459,6 +460,7 @@ export class HdcSession {
       serial: this.serial,
       hostname: this.hostname,
       keyPair: this.keyPair,
+      publicKeyPem: this.publicKeyPem,
       ...(this.version ? { version: this.version } : {}),
     });
 

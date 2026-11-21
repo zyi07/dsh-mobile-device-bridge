@@ -3,10 +3,10 @@ import { Adb, AdbDaemonTransport } from '@yume-chan/adb';
 import { AdbDaemonWebUsbDeviceManager } from '@yume-chan/adb-daemon-webusb';
 import AdbWebCredentialStore from '@yume-chan/adb-credential-web';
 import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
-import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION } from './hdc/session.js';
+import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } from './hdc/session.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r48';
+const BUILD_TAG = 'r49';
 
 export const inject = ['slots', 'locale'];
 
@@ -48,6 +48,7 @@ const STATE = {
   kind: null,         // 'adb' | 'hdc'
   log: [],            // HDC 收发日志（失败时显示到输出区）
   notify: null,       // 面板注册的实时刷新回调
+  hdcKeyText: '',     // 可选：用户粘贴的 hdc 已有私钥（复用它可免除上机确认）
   connection: null,   // 宿主 RPC 连接（用于把 HDC 日志送到宿主落盘）
 };
 
@@ -166,12 +167,25 @@ async function connectHarmony(device) {
 async function connectHarmonyInner(t, device) {
   t.emit('INFO', `vid=0x${device.vendorId.toString(16)} pid=0x${device.productId.toString(16)} `
     + `serial="${device.serialNumber || ''}" 版本=${DAEMON_VERSION}`); 
-  const keyPair = await hdcGenerateKeyPair();
+  // 有粘贴的 hdc 私钥就复用它（该密钥已被设备信任，可免上机确认）；否则现场生成
+  let keyPair = null;
+  let publicKeyPem = null;
+  if (STATE.hdcKeyText && STATE.hdcKeyText.trim()) {
+    t.emit('INFO', '使用粘贴的 hdc 私钥（复用已授权密钥）');
+    const imported = await importHdcKey(STATE.hdcKeyText);
+    keyPair = { privateKey: imported.privateKey };
+    publicKeyPem = imported.publicKeyPem;
+    t.emit('INFO', `公钥 PEM ${publicKeyPem.length}B, 首行=${publicKeyPem.split('\n')[0]}`);
+  } else {
+    keyPair = await hdcGenerateKeyPair();
+    t.emit('INFO', '使用现场生成的 RSA-3072 密钥（首次需在手机上确认）');
+  }
   const hostname = (typeof location !== 'undefined' && location.hostname) ? location.hostname : 'dsh-web';
   const session = new HdcSession(t, {
     serial: device.serialNumber || '',
     hostname,
     keyPair,
+    publicKeyPem,
   });
   const authText = await session.connect();
 
@@ -362,6 +376,7 @@ function MobileBridgeSection(props) {
   const [out, setOut] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [copied, setCopied] = React.useState(false);
+  const [keyText, setKeyText] = React.useState(STATE.hdcKeyText || '');
   const [usbSupported] = React.useState(
     typeof navigator !== 'undefined' && !!navigator.usb,
   );
@@ -580,6 +595,19 @@ function MobileBridgeSection(props) {
     children.push(h('div', { key: 'nu', className: 'mb-note' }, t('noWebusb')));
   }
 
+  children.push(h('details', { key: 'key', className: 'mb-note', style: { marginTop: '10px' } },
+    h('summary', { style: { cursor: 'pointer', userSelect: 'none' } }, t('hdcKeyTitle')),
+    h('div', { style: { marginTop: '6px', lineHeight: 1.6 } }, t('hdcKeyHint')),
+    h('textarea', {
+      className: 'mb-in',
+      rows: 5,
+      style: { width: '100%', marginTop: '6px', fontFamily: 'ui-monospace, Menlo, monospace' },
+      value: keyText,
+      placeholder: '-----BEGIN PRIVATE KEY-----',
+      onChange: (e) => { setKeyText(e.target.value); STATE.hdcKeyText = e.target.value; },
+    }),
+  ));
+
   if (error) {
     children.push(h('div', { key: 'e', className: 'mb-err' }, error));
   }
@@ -661,6 +689,8 @@ export function apply(ctx) {
       copyFailed: '复制失败：浏览器拒绝了剪贴板写入，请手动选中输出复制。',
       os: '系统',
       diagnose: '诊断',
+      hdcKeyTitle: '已有 HDC 私钥（可选，可免除手机确认）',
+      hdcKeyHint: '如果你的电脑上 hdc 已经能连上这台手机，说明它的密钥已被设备信任。把这两个文件的内容一起粘贴进来（先私钥再公钥）：\nC:\\Users\\<你>\\.harmony\\hdckey  和  hdckey.pub\n提取方法（PowerShell）：Get-Content -Raw "$env:USERPROFILE\\.harmony\\hdckey"; Get-Content -Raw "$env:USERPROFILE\\.harmony\\hdckey.pub"',
       kindLabel: '设备类型',
       kindAdb: 'Android',
       kindHdc: 'HarmonyOS',
@@ -693,6 +723,8 @@ export function apply(ctx) {
       copyFailed: 'Copy failed: the browser refused clipboard access. Select the output and copy manually.',
       os: 'OS',
       diagnose: 'Diagnose',
+      hdcKeyTitle: 'Existing HDC private key (optional, skips phone confirmation)',
+      hdcKeyHint: 'If hdc already connects to this phone from this PC, that key is trusted. Paste both files (private key first, then public key).',
       kindLabel: 'Device type',
       kindAdb: 'Android',
       kindHdc: 'HarmonyOS',
