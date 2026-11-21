@@ -401,6 +401,21 @@ export class HdcSession {
     this.hbTimer = null;
     this.hbCount = 0;
     this.info = null;
+    /** 被新连接取代时置 true：所有后续写入/重试必须立即停止 */
+    this.aborted = false;
+  }
+
+  /** 标记此会话作废（被新连接取代 / 用户断开）：之后所有写入与重试立即停止 */
+  abort(reason = 'unknown') {
+    if (this.aborted) { return; }
+    this.aborted = true;
+    this.stopHeartbeat();
+    try { this.t.emit('INFO', `会话作废（${reason}）`); } catch { /* ignore */ }
+  }
+
+  /** 写/重试前调用；作废后抛错，防止旧帧污染新会话 */
+  ensureAlive() {
+    if (this.aborted) { throw new Error('会话已作废，已中止操作'); }
   }
 
   /** 建立连接并完成 AUTH。返回 daemon 的 AUTH_OK 状态文本。 */
@@ -414,6 +429,7 @@ export class HdcSession {
 
     let needConfirm = false;
     for (let round = 1; round <= confirmRounds; round++) {
+      this.ensureAlive();
       try {
         return await this.handshake({ resetFirst: resetFirst || round > 1, resetSettleMs });
       } catch (e) {
@@ -470,6 +486,7 @@ export class HdcSession {
     });
 
     let frame = await hs.start();
+    this.ensureAlive();
     await this.t.writeFrame({ sessionId: this.sessionId, frame });
 
     const AUTH_NAMES = { 0: 'NONE', 1: 'TOKEN', 2: 'SIGNATURE', 3: 'PUBLICKEY', 4: 'OK', 5: 'FAIL' };
@@ -587,6 +604,7 @@ export class HdcSession {
     if (!this.authorized) { throw new Error('尚未完成 AUTH'); }
     let last = null;
     for (let i = 1; i <= attempts; i++) {
+      this.ensureAlive();
       last = await this.shellOnce(text, timeoutMs);
       if (last.text !== '') { return last; }
       if (i < attempts) {
@@ -599,6 +617,7 @@ export class HdcSession {
   }
 
   async shellOnce(text, timeoutMs = 20000) {
+    this.ensureAlive();
     const channelId = randomId();
     await this.t.writeFrame({
       sessionId: this.sessionId,
@@ -632,7 +651,7 @@ export class HdcSession {
       }
     } finally {
       // 主机侧也要发关闭（抓包里是 0x00）
-      try {
+      if (!this.aborted) try {
         await this.t.writeFrame({
           sessionId: this.sessionId,
           frame: buildCloseFrame({ channelId, side: 'host' }),

@@ -558,3 +558,25 @@ token 拿到了、签名也发出去了，但**验签失败** → 问题在签�
 - 截图加入 `ls -l` 诊断（区分"截图没生成"与"无 base64 命令"），并尝试
   `base64` / `base64 -w0` / `cat | base64` 三种写法
 - 构建标记 r56
+
+## 2026-11-22 00:35 - 会话作废机制（HDC）+ 安卓同类问题一并对齐
+
+**真机现象：** 重新连接时握手拿不到应答。日志显示本次会话 sid=0x113298C5，
+但端点里出现 sid=0x43CA5424 的帧（**上一次会话**），daemon 视为 softreset 丢弃，
+连本次的握手应答一起被吞。根因：上一次 `param get` 的重试循环仍在跑
+（3 次 × 20s），继续往端点写旧 sid 的帧。
+
+**HDC 侧：**
+- `HdcSession.abort()` / `ensureAlive()`：作废后所有写入与重试立即抛错
+- `connect()` 每轮、`handshake()` 写入前、`shell()` 每次尝试前都 `ensureAlive()`
+- UI 每次连接自增 `STATE.connectToken`，并先 `abort()` 旧会话
+- 连接探测参数改为**单次尝试 + 6s 超时**，避免长时间占用
+
+**安卓侧（同类隐患，一并对齐）：**
+- `detach()` 先 `hdc.abort()` 再关闭，保证旧会话不再写
+- 安卓连接分支在 `requestDevice` / `attach` 之后校验令牌，过期则 `detach()`
+- 挂载静默重连尊重令牌，与手动连接互斥，避免两次 `device.connect()` 抢同一设备
+- `runShell` / `runJob` / 截图：结果回来时校验令牌，连接切换则丢弃旧结果
+- 截图统一为 `captureScreen()`（ADB: screencap / HDC: snapshot_display+base64），
+  UI 与宿主任务共用；`runJob` 的截图不再误报"HDC 不支持"
+- 构建标记 r58

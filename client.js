@@ -6422,6 +6422,21 @@ class HdcSession {
     this.hbTimer = null;
     this.hbCount = 0;
     this.info = null;
+    /** 被新连接取代时置 true：所有后续写入/重试必须立即停止 */
+    this.aborted = false;
+  }
+
+  /** 标记此会话作废（被新连接取代 / 用户断开）：之后所有写入与重试立即停止 */
+  abort(reason = 'unknown') {
+    if (this.aborted) { return; }
+    this.aborted = true;
+    this.stopHeartbeat();
+    try { this.t.emit('INFO', `会话作废（${reason}）`); } catch { /* ignore */ }
+  }
+
+  /** 写/重试前调用；作废后抛错，防止旧帧污染新会话 */
+  ensureAlive() {
+    if (this.aborted) { throw new Error('会话已作废，已中止操作'); }
   }
 
   /** 建立连接并完成 AUTH。返回 daemon 的 AUTH_OK 状态文本。 */
@@ -6435,6 +6450,7 @@ class HdcSession {
 
     let needConfirm = false;
     for (let round = 1; round <= confirmRounds; round++) {
+      this.ensureAlive();
       try {
         return await this.handshake({ resetFirst: resetFirst || round > 1, resetSettleMs });
       } catch (e) {
@@ -6491,6 +6507,7 @@ class HdcSession {
     });
 
     let frame = await hs.start();
+    this.ensureAlive();
     await this.t.writeFrame({ sessionId: this.sessionId, frame });
 
     const AUTH_NAMES = { 0: 'NONE', 1: 'TOKEN', 2: 'SIGNATURE', 3: 'PUBLICKEY', 4: 'OK', 5: 'FAIL' };
@@ -6608,6 +6625,7 @@ class HdcSession {
     if (!this.authorized) { throw new Error('尚未完成 AUTH'); }
     let last = null;
     for (let i = 1; i <= attempts; i++) {
+      this.ensureAlive();
       last = await this.shellOnce(text, timeoutMs);
       if (last.text !== '') { return last; }
       if (i < attempts) {
@@ -6620,6 +6638,7 @@ class HdcSession {
   }
 
   async shellOnce(text, timeoutMs = 20000) {
+    this.ensureAlive();
     const channelId = randomId();
     await this.t.writeFrame({
       sessionId: this.sessionId,
@@ -6653,7 +6672,7 @@ class HdcSession {
       }
     } finally {
       // 主机侧也要发关闭（抓包里是 0x00）
-      try {
+      if (!this.aborted) try {
         await this.t.writeFrame({
           sessionId: this.sessionId,
           frame: buildCloseFrame({ channelId, side: 'host' }),
@@ -6753,7 +6772,7 @@ function hexOf(bytes, limit = 256) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r56';
+const BUILD_TAG = 'r58';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -6806,7 +6825,8 @@ const STATE = {
   kind: null,         // 'adb' | 'hdc'
   log: [],            // HDC 收发日志（失败时显示到输出区）
   notify: null,       // 面板注册的实时刷新回调
-  hdcKeyText: '',     // 可选：用户粘贴的 hdc 已有私钥（复用它可免除上机确认）
+  hdcKeyText: '',     // 保留字段（已不再暴露 UI）
+  connectToken: 0,    // 每次连接自增；旧任务发现令牌变化即放弃
   connection: null,   // 宿主 RPC 连接（用于把 HDC 日志送到宿主落盘）
 };
 
@@ -6888,6 +6908,7 @@ async function detach() {
   STATE.device = null;
   STATE.info = null;
   STATE.kind = null;
+  if (hdc) { try { hdc.abort('主动断开'); } catch { /* ignore */ } }
   if (adb) { try { await adb.close(); } catch { /* ignore */ } }
   if (hdc) { try { await hdc.close(); } catch { /* ignore */ } }
 }
@@ -6900,8 +6921,9 @@ async function detach() {
  *   · 首次要现场生成 RSA-3072 密钥对并用它应答 daemon 的 AUTH
  *   · 连上后先跑一条 param get 拿型号，作为面板展示信息
  */
-async function connectHarmony(device) {
+async function connectHarmony(device, token) {
   const attempt = async (dev) => {
+    checkToken();
     STATE.log = [];
     pushHdcLog('INFO', `=== 尝试连接开始 build=${BUILD_TAG} serial=${JSON.stringify(dev.serialNumber || '')} ===`);
     await flushHdcLog();          // 先落一条，确保宿主侧能看到"这次确实跑了"
@@ -6912,6 +6934,12 @@ async function connectHarmony(device) {
       // 失败必须释放：否则设备句柄留在 open 状态，之后每次 claim 都会失败
       try { await t.close(); } catch { /* ignore */ }
       throw e;
+    }
+  };
+
+  const checkToken = () => {
+    if (typeof token === 'number' && STATE.connectToken !== token) {
+      throw new Error('已被新的连接操作取代，本次放弃');
     }
   };
 
@@ -6970,7 +6998,8 @@ async function connectHarmonyInner(t, device) {
   const probe = async (keys) => {
     for (const key of keys) {
       try {
-        const r = await session.shell(`param get ${key}`, { timeoutMs: 8000 });
+        if (STATE.connectToken !== token) { return ''; }
+        const r = await session.shell(`param get ${key}`, { timeoutMs: 6000, attempts: 1 });
         const lines = String(r.text || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
         const val = lines.filter((l) => !l.includes('param get')).pop() || '';
         if (val && !/^\[?E\d/.test(val) && !/^error/i.test(val)) { return val; }
@@ -7000,6 +7029,46 @@ async function connectHarmonyInner(t, device) {
 }
 
 /** 统一执行一条 shell 命令（ADB 或 HDC）。 */
+/**
+ * 截图：ADB 用 screencap，HDC 用 snapshot_display + base64 读回。
+ * 返回 { bytes, mime }。
+ */
+async function captureScreen() {
+  if (STATE.kind === 'hdc' && STATE.hdc) {
+    const s = STATE.hdc;
+    const path = `/data/local/tmp/dsh_shot_${Date.now()}.jpeg`;
+    pushHdcLog('INFO', `截图：snapshot_display → ${path}`);
+    const r1 = await s.shell(`snapshot_display -f ${path}`, { timeoutMs: 20000, attempts: 1 });
+    pushHdcLog('INFO', `snapshot_display 输出: ${JSON.stringify(String(r1.text || '').slice(0, 120))}`);
+
+    const rLs = await s.shell(`ls -l ${path}`, { timeoutMs: 8000, attempts: 1 });
+    pushHdcLog('INFO', `ls -l: ${JSON.stringify(String(rLs.text || '').slice(0, 160))}`);
+
+    let b64 = '';
+    for (const cmd of [`base64 ${path}`, `base64 -w0 ${path}`, `cat ${path} | base64`]) {
+      const r = await s.shell(cmd, { timeoutMs: 90000, attempts: 1 });
+      const cand = String(r.text || '').replace(/[^A-Za-z0-9+/=]/g, '');
+      pushHdcLog('INFO', `${cmd} → ${cand.length} 字符`);
+      if (cand.length > 1000) { b64 = cand; break; }
+    }
+    s.shell(`rm -f ${path}`, { timeoutMs: 8000, attempts: 1 }).catch(() => {});
+    if (!b64) {
+      throw new Error('截图文件读回为空。'
+        + `snapshot 输出=${JSON.stringify(String(r1.text || '').slice(0, 80))}；`
+        + `ls -l=${JSON.stringify(String(rLs.text || '').slice(0, 80))}`);
+    }
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) { bytes[i] = bin.charCodeAt(i); }
+    return { bytes, mime: 'image/jpeg' };
+  }
+
+  const adb = STATE.adb;
+  if (!adb) { throw new Error('未连接设备'); }
+  const bytes = await adb.subprocess.noneProtocol.spawnWait('screencap -p');
+  return { bytes, mime: 'image/png' };
+}
+
 async function execShell(cmd) {
   if (STATE.kind === 'hdc' && STATE.hdc) {
     const r = await STATE.hdc.shell(cmd);
@@ -7047,21 +7116,22 @@ const POLL_INTERVAL_MS = 1500;
 
 /** 执行一条宿主派下来的任务。 */
 async function runJob(job) {
-  const adb = STATE.adb;
   if (!STATE.adb && !STATE.hdc) { return { ok: false, error: '浏览器端尚未连接设备（请在设置页点「连接设备」）' }; }
+  const token = STATE.connectToken;
+  const stale = () => STATE.connectToken !== token;
   try {
     if (job.kind === 'shell') {
-      return { ok: true, output: await execShell(job.data.cmd) };
+      const output = await execShell(job.data.cmd);
+      if (stale()) { return { ok: false, error: '连接已切换，任务作废' }; }
+      return { ok: true, output };
     }
     if (job.kind === 'screenshot') {
-      if (STATE.kind === 'hdc') {
-        return { ok: false, error: 'HDC 通道暂不支持截图（需要文件传输，尚未实现）' };
+      const shot = await captureScreen();
+      if (stale()) { return { ok: false, error: '连接已切换，任务作废' }; }
+      if (shot.bytes.length > 12 * 1024 * 1024) {
+        return { ok: false, error: `截图过大（${shot.bytes.length} 字节），未回传` };
       }
-      const bytes = await adb.subprocess.noneProtocol.spawnWait('screencap -p');
-      if (bytes.length > 12 * 1024 * 1024) {
-        return { ok: false, error: `截图过大（${bytes.length} 字节），未回传` };
-      }
-      return { ok: true, base64: toBase64(bytes) };
+      return { ok: true, base64: toBase64(shot.bytes), mime: shot.mime };
     }
     return { ok: false, error: '未知任务类型 ' + job.kind };
   } catch (e) {
@@ -7069,11 +7139,6 @@ async function runJob(job) {
   }
 }
 
-/**
- * 轮询宿主取任务 → 在本地 adb 上执行 → 回传结果。
- * 这条链路与 UI 是否可见无关：只要标签页还活着就会跑；
- * 但标签页被浏览器挂起（后台节流）时会变慢。
- */
 function startBridge(connection) {
   STATE.connection = connection;
   let stopped = false;
@@ -7181,10 +7246,12 @@ function MobileBridgeSection(props) {
       if (!manager) { return; }
       setPhase('reconnecting');
       try {
+        const token = STATE.connectToken;
         const devices = await manager.getDevices();
-        if (devices.length > 0 && !STATE.pending) {
+        if (devices.length > 0 && !STATE.pending && STATE.connectToken === token) {
           STATE.pending = attach(devices[0]).finally(() => { STATE.pending = null; });
           const next = await STATE.pending;
+          if (STATE.connectToken !== token) { await detach(); return; }   // 用户已手动连接
           if (alive) { setInfo(next); setPhase('connected'); return; }
         }
       } catch { /* 静默失败：交回手动连接 */ }
@@ -7196,6 +7263,10 @@ function MobileBridgeSection(props) {
   async function connect() {
     setError('');
     setPhase('connecting');
+    // 作废上一次会话：避免它的重试循环继续往端点写旧 sid 的帧
+    const token = ++STATE.connectToken;
+    if (STATE.hdc) { try { STATE.hdc.abort('用户发起新连接'); } catch { /* ignore */ } STATE.hdc = null; }
+    STATE.info = null;
     try {
       if (kind === 'hdc') {
         // HarmonyOS：直接用 WebUSB 选设备（华为 VID），再走 HDC 协议
@@ -7203,7 +7274,7 @@ function MobileBridgeSection(props) {
         const device = await navigator.usb.requestDevice({ filters: [{ vendorId: 0x12d1 }] });
         if (!device) { setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle'); return; }
         if (STATE.adb || STATE.hdc) { await detach(); }
-        const next = await connectHarmony(device);
+        const next = await connectHarmony(device, token);
         await flushHdcLog();
         setInfo(next);
         setCmd('param get const.product.model');
@@ -7213,9 +7284,11 @@ function MobileBridgeSection(props) {
       const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
       if (!manager) { throw new Error(t('noWebusb')); }
       const device = await manager.requestDevice();
+      if (STATE.connectToken !== token) { return; }        // 期间已发起新连接
       if (!device) { setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle'); return; }
       if (STATE.adb || STATE.hdc) { await detach(); }
       const next = await attach(device);
+      if (STATE.connectToken !== token) { await detach(); return; }   // 连接被取代
       setInfo(next);
       setCmd('getprop ro.product.model');
       setPhase('connected');
@@ -7251,8 +7324,11 @@ function MobileBridgeSection(props) {
     if (!STATE.adb && !STATE.hdc) { setPhase('idle'); return; }
     setBusy(true);
     setError('');
+    const token = STATE.connectToken;
     try {
-      setOut(await execShell(cmd));
+      const text = await execShell(cmd);
+      if (STATE.connectToken !== token) { return; }   // 连接已切换，丢弃旧结果
+      setOut(text);
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
       const hint = friendly(raw, t, kind);
@@ -7276,75 +7352,22 @@ function MobileBridgeSection(props) {
   }
 
   async function screenshot() {
-    if (STATE.kind === 'hdc') {
-      const s = STATE.hdc;
-      if (!s) { setPhase('idle'); return; }
-      setBusy(true);
-      setError('');
-      try {
-        const path = `/data/local/tmp/dsh_shot_${Date.now()}.jpeg`;
-        pushHdcLog('INFO', `截图：snapshot_display → ${path}`);
-        const r1 = await s.shell(`snapshot_display -f ${path}`, { timeoutMs: 20000 });
-        pushHdcLog('INFO', `snapshot_display 输出: ${JSON.stringify(String(r1.text || '').slice(0, 200))}`);
-
-        // 先确认文件是否真的生成了（区分"截图没成功"与"没有 base64 命令"）
-        const rLs = await s.shell(`ls -l ${path}`, { timeoutMs: 8000 });
-        pushHdcLog('INFO', `ls -l 结果: ${JSON.stringify(String(rLs.text || '').slice(0, 200))}`);
-
-        let b64 = '';
-        for (const cmd of [`base64 ${path}`, `base64 -w0 ${path}`, `cat ${path} | base64`]) {
-          const r = await s.shell(cmd, { timeoutMs: 90000 });
-          const cand = String(r.text || '').replace(/[^A-Za-z0-9+/=]/g, '');
-          pushHdcLog('INFO', `${cmd} → ${cand.length} 字符`);
-          if (cand.length > 1000) { b64 = cand; break; }
-        }
-        s.shell(`rm -f ${path}`, { timeoutMs: 8000 }).catch(() => {});
-
-        if (!b64) {
-          throw new Error('截图文件读回为空。'
-            + `snapshot_display 输出=${JSON.stringify(String(r1.text || '').slice(0, 100))}；`
-            + `ls -l=${JSON.stringify(String(rLs.text || '').slice(0, 100))}`);
-        }
-        const bin = atob(b64);
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) { bytes[i] = bin.charCodeAt(i); }
-        const url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
-        window.open(url, '_blank');
-        pushHdcLog('INFO', `截图完成：${bytes.length} 字节`);
-      } catch (e) {
-        const raw = String(e && e.message ? e.message : e);
-        setError('截图失败：' + raw);
-        setOut((STATE.log || []).slice(-30).join('\n'));
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-    const adb = STATE.adb;
-    if (!adb) { setPhase('idle'); return; }
+    if (!STATE.adb && !STATE.hdc) { setPhase('idle'); return; }
     setBusy(true);
     setError('');
+    const token = STATE.connectToken;
     try {
-      const bytes = await adb.subprocess.noneProtocol.spawnWait('screencap -p');
-      const url = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
+      const shot = await captureScreen();
+      // 期间连接被切换 → 丢弃结果，避免把旧设备屏幕当成新设备
+      if (STATE.connectToken !== token) { return; }
+      const url = URL.createObjectURL(new Blob([shot.bytes], { type: shot.mime }));
       window.open(url, '_blank');
+      pushHdcLog('INFO', `截图完成：${shot.bytes.length} 字节`);
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
       const hint = friendly(raw, t, kind);
-      // 日志与原始错误在下面统一设置（并把日志复制到剪贴板）
-      const logText = (STATE.log && STATE.log.length)
-        ? STATE.log.join('\n')
-        : '（本次未产生收发日志：说明失败发生在创建传输层之前）';
-      setOut(logText);
-      try {
-        // 方便用户直接粘贴给开发者：失败即把完整日志放进剪贴板
-        await navigator.clipboard.writeText(logText);
-        setError((hint ? (hint + '\n\n') : '') + '原始错误：' + raw
-          + '\n\n完整收发日志已复制到剪贴板，直接 Ctrl+V 粘贴即可。');
-      } catch {
-        setError((hint ? (hint + '\n\n') : '') + '原始错误：' + raw);
-      }
-      await flushHdcLog();
+      setError(hint ? (hint + '\n\n原始错误：' + raw) : '截图失败：' + raw);
+      setOut((STATE.log || []).slice(-30).join('\n') || raw);
     } finally {
       setBusy(false);
     }
