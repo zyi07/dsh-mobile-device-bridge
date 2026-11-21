@@ -3,7 +3,7 @@ import { Adb, AdbDaemonTransport } from '@yume-chan/adb';
 import { AdbDaemonWebUsbDeviceManager } from '@yume-chan/adb-daemon-webusb';
 import AdbWebCredentialStore from '@yume-chan/adb-credential-web';
 import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
-import { generateKeyPair as hdcGenerateKeyPair } from './hdc/session.js';
+import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION } from './hdc/session.js';
 
 export const inject = ['slots', 'locale'];
 
@@ -43,7 +43,18 @@ const STATE = {
   info: null,         // 面板展示用的设备信息
   pending: null,      // 挂载时静默重连的进行中 Promise
   kind: null,         // 'adb' | 'hdc'
+  log: [],            // HDC 收发日志（失败时显示到输出区）
 };
+
+function pushHdcLog(dir, text) {
+  const d = new Date();
+  const ts = String(d.getHours()).padStart(2, '0') + ':' +
+    String(d.getMinutes()).padStart(2, '0') + ':' +
+    String(d.getSeconds()).padStart(2, '0') + '.' +
+    String(d.getMilliseconds()).padStart(3, '0');
+  STATE.log.push(`${ts} ${dir} ${text}`);
+  if (STATE.log.length > 400) { STATE.log.shift(); }
+}
 
 if (typeof window !== 'undefined') {
   window.addEventListener('pagehide', () => {
@@ -109,7 +120,8 @@ async function detach() {
  */
 async function connectHarmony(device) {
   const attempt = async (dev) => {
-    const t = new HdcTransport(dev);
+    STATE.log = [];
+    const t = new HdcTransport(dev, { logger: pushHdcLog });
     try {
       return await connectHarmonyInner(t, dev);
     } catch (e) {
@@ -134,6 +146,8 @@ async function connectHarmony(device) {
 }
 
 async function connectHarmonyInner(t, device) {
+  t.emit('INFO', `vid=0x${device.vendorId.toString(16)} pid=0x${device.productId.toString(16)} `
+    + `serial="${device.serialNumber || ''}" 版本=${DAEMON_VERSION}`); 
   const keyPair = await hdcGenerateKeyPair();
   const hostname = (typeof location !== 'undefined' && location.hostname) ? location.hostname : 'dsh-web';
   const session = new HdcSession(t, {
@@ -388,6 +402,8 @@ function MobileBridgeSection(props) {
       const hint = friendly(raw, t, kind);
       // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
       setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
+      // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
+      if (STATE.log && STATE.log.length) { setOut(STATE.log.join('\n')); }
       setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle');
     }
   }
@@ -410,6 +426,8 @@ function MobileBridgeSection(props) {
       const hint = friendly(raw, t, kind);
       // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
       setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
+      // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
+      if (STATE.log && STATE.log.length) { setOut(STATE.log.join('\n')); }
     } finally {
       setBusy(false);
     }
@@ -433,6 +451,8 @@ function MobileBridgeSection(props) {
       const hint = friendly(raw, t, kind);
       // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
       setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
+      // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
+      if (STATE.log && STATE.log.length) { setOut(STATE.log.join('\n')); }
     } finally {
       setBusy(false);
     }

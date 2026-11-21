@@ -109,9 +109,10 @@ function findBulkEndpoints(alt) {
  * 不做任何协议语义。
  */
 export class HdcTransport {
-  constructor(device, { readChunk = 512 } = {}) {
+  constructor(device, { readChunk = 512, logger = null } = {}) {
     this.device = device;
     this.readChunk = readChunk;
+    this.logger = logger;          // (dir, text) => void，用于把收发过程显示出来
     this.iface = null;
     this.rx = new Uint8Array(0);
     this.opened = false;
@@ -185,11 +186,13 @@ export class HdcTransport {
    */
   async writeFrame({ sessionId, frame, option = OPT_HEADER }) {
     const head = buildUsbHead({ sessionId, dataSize: frame.length, option });
+    this.emit('TX', `ub-head opt=${option} sid=0x${(sessionId >>> 0).toString(16).toUpperCase()} len=${frame.length}`);
     const r1 = await this.device.transferOut(this.iface.endpointOut, head);
     if (r1.status !== 'ok' || r1.bytesWritten !== head.length) {
       throw new Error(`写 UB 头失败: ${r1.status} ${r1.bytesWritten}/${head.length}`);
     }
-    if (option === OPT_RESET) { return; }         // RESET 只有头，没有帧
+    if (option === OPT_RESET) { this.emit('TX', 'reset(无帧)'); return; }   // RESET 只有头，没有帧
+    this.emit('TX', `frame ${frame.length}B ${bytesToHexPreview(frame)}`);
     const r2 = await this.device.transferOut(this.iface.endpointOut, frame);
     if (r2.status !== 'ok' || r2.bytesWritten !== frame.length) {
       throw new Error(`写帧失败: ${r2.status} ${r2.bytesWritten}/${frame.length}`);
@@ -215,7 +218,7 @@ export class HdcTransport {
         sleep(remain).then(() => ({ status: 'timeout' })),
       ]);
 
-      if (res.status === 'timeout') { return null; }
+      if (res.status === 'timeout') { this.emit('RX', 'timeout（本轮无数据）'); return null; }
       if (res.status !== 'ok') {
         if (res.status === 'stall') {
           try { await this.device.clearHalt('in', this.iface.endpointIn); } catch { /* ignore */ }
@@ -227,6 +230,11 @@ export class HdcTransport {
         this.append(new Uint8Array(res.data.buffer, res.data.byteOffset, res.data.byteLength));
       }
     }
+  }
+
+  /** 记一条收发日志（没有 logger 时静默） */
+  emit(dir, text) {
+    if (this.logger) { this.logger(dir, text); }
   }
 
   append(chunk) {
@@ -258,6 +266,7 @@ export class HdcTransport {
           this.rx = this.rx.slice(this.rx.length - keep);
           return null;                    // 需要更多数据才能重新对齐
         }
+        this.emit('SYNC', `跳过 ${idx} 字节垃圾（对齐到 UB）`);
         this.dropped += idx;
         this.resyncs += 1;
         this.rx = this.rx.slice(idx);
@@ -287,6 +296,7 @@ export class HdcTransport {
 
       const frame = this.rx.slice(USB_HEAD_SIZE, need);
       this.rx = this.rx.slice(need);
+      this.emit('RX', `pkt opt=${head.option} sid=0x${(head.sessionId >>> 0).toString(16).toUpperCase()} len=${head.dataSize} ${bytesToHexPreview(frame)}`);
       return { head, frame };
     }
   }
@@ -357,7 +367,15 @@ export class HdcSession {
     await this.t.writeFrame({ sessionId: this.sessionId, frame });
 
     for (let step = 0; step < 6; step++) {
-      const pkt = await this.t.readPacket({ timeoutMs: 5000 });
+      let pkt = await this.t.readPacket({ timeoutMs: 8000 });
+      // 首帧没回音时重发一次：设备可能仍处在"上一个会话未完全清理"的状态，
+      // 重发能让 daemon 走 "New session coming" 分支。
+      if (!pkt && step === 0) {
+        this.t.emit('INFO', '首帧无应答，重发第 1 帧一次');
+        await this.t.drainIdle({ timeoutMs: 100, rounds: 5 });
+        await this.t.writeFrame({ sessionId: this.sessionId, frame });
+        pkt = await this.t.readPacket({ timeoutMs: 8000 });
+      }
       if (!pkt) { throw new Error(`握手超时（第 ${step + 1} 次等待应答）`); }
       if (pkt.head.option !== OPT_HEADER) { continue; }
       let reply;
@@ -506,4 +524,11 @@ async function probeClaim(device) {
     if (claimed) { try { await device.releaseInterface(target.interfaceNumber); } catch { /* ignore */ } }
     if (openedHere) { try { await device.close(); } catch { /* ignore */ } }
   }
+}
+
+
+function bytesToHexPreview(bytes, n = 24) {
+  const arr = bytes.subarray(0, Math.min(n, bytes.length));
+  const hex = [...arr].map((b) => b.toString(16).padStart(2, '0')).join(' ');
+  return hex + (bytes.length > n ? ' ...' : '');
 }

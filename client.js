@@ -6009,9 +6009,10 @@ function findBulkEndpoints(alt) {
  * 不做任何协议语义。
  */
 class HdcTransport {
-  constructor(device, { readChunk = 512 } = {}) {
+  constructor(device, { readChunk = 512, logger = null } = {}) {
     this.device = device;
     this.readChunk = readChunk;
+    this.logger = logger;          // (dir, text) => void，用于把收发过程显示出来
     this.iface = null;
     this.rx = new Uint8Array(0);
     this.opened = false;
@@ -6085,11 +6086,13 @@ class HdcTransport {
    */
   async writeFrame({ sessionId, frame, option = OPT_HEADER }) {
     const head = buildUsbHead({ sessionId, dataSize: frame.length, option });
+    this.emit('TX', `ub-head opt=${option} sid=0x${(sessionId >>> 0).toString(16).toUpperCase()} len=${frame.length}`);
     const r1 = await this.device.transferOut(this.iface.endpointOut, head);
     if (r1.status !== 'ok' || r1.bytesWritten !== head.length) {
       throw new Error(`写 UB 头失败: ${r1.status} ${r1.bytesWritten}/${head.length}`);
     }
-    if (option === OPT_RESET) { return; }         // RESET 只有头，没有帧
+    if (option === OPT_RESET) { this.emit('TX', 'reset(无帧)'); return; }   // RESET 只有头，没有帧
+    this.emit('TX', `frame ${frame.length}B ${bytesToHexPreview(frame)}`);
     const r2 = await this.device.transferOut(this.iface.endpointOut, frame);
     if (r2.status !== 'ok' || r2.bytesWritten !== frame.length) {
       throw new Error(`写帧失败: ${r2.status} ${r2.bytesWritten}/${frame.length}`);
@@ -6115,7 +6118,7 @@ class HdcTransport {
         sleep$1(remain).then(() => ({ status: 'timeout' })),
       ]);
 
-      if (res.status === 'timeout') { return null; }
+      if (res.status === 'timeout') { this.emit('RX', 'timeout（本轮无数据）'); return null; }
       if (res.status !== 'ok') {
         if (res.status === 'stall') {
           try { await this.device.clearHalt('in', this.iface.endpointIn); } catch { /* ignore */ }
@@ -6127,6 +6130,11 @@ class HdcTransport {
         this.append(new Uint8Array(res.data.buffer, res.data.byteOffset, res.data.byteLength));
       }
     }
+  }
+
+  /** 记一条收发日志（没有 logger 时静默） */
+  emit(dir, text) {
+    if (this.logger) { this.logger(dir, text); }
   }
 
   append(chunk) {
@@ -6158,6 +6166,7 @@ class HdcTransport {
           this.rx = this.rx.slice(this.rx.length - keep);
           return null;                    // 需要更多数据才能重新对齐
         }
+        this.emit('SYNC', `跳过 ${idx} 字节垃圾（对齐到 UB）`);
         this.dropped += idx;
         this.resyncs += 1;
         this.rx = this.rx.slice(idx);
@@ -6187,6 +6196,7 @@ class HdcTransport {
 
       const frame = this.rx.slice(USB_HEAD_SIZE, need);
       this.rx = this.rx.slice(need);
+      this.emit('RX', `pkt opt=${head.option} sid=0x${(head.sessionId >>> 0).toString(16).toUpperCase()} len=${head.dataSize} ${bytesToHexPreview(frame)}`);
       return { head, frame };
     }
   }
@@ -6257,7 +6267,15 @@ class HdcSession {
     await this.t.writeFrame({ sessionId: this.sessionId, frame });
 
     for (let step = 0; step < 6; step++) {
-      const pkt = await this.t.readPacket({ timeoutMs: 5000 });
+      let pkt = await this.t.readPacket({ timeoutMs: 8000 });
+      // 首帧没回音时重发一次：设备可能仍处在"上一个会话未完全清理"的状态，
+      // 重发能让 daemon 走 "New session coming" 分支。
+      if (!pkt && step === 0) {
+        this.t.emit('INFO', '首帧无应答，重发第 1 帧一次');
+        await this.t.drainIdle({ timeoutMs: 100, rounds: 5 });
+        await this.t.writeFrame({ sessionId: this.sessionId, frame });
+        pkt = await this.t.readPacket({ timeoutMs: 8000 });
+      }
       if (!pkt) { throw new Error(`握手超时（第 ${step + 1} 次等待应答）`); }
       if (pkt.head.option !== OPT_HEADER) { continue; }
       let reply;
@@ -6408,6 +6426,13 @@ async function probeClaim(device) {
   }
 }
 
+
+function bytesToHexPreview(bytes, n = 24) {
+  const arr = bytes.subarray(0, Math.min(n, bytes.length));
+  const hex = [...arr].map((b) => b.toString(16).padStart(2, '0')).join(' ');
+  return hex + (bytes.length > n ? ' ...' : '');
+}
+
 const inject = ['slots', 'locale'];
 
 const NS = 'mobile-bridge';
@@ -6446,7 +6471,18 @@ const STATE = {
   info: null,         // 面板展示用的设备信息
   pending: null,      // 挂载时静默重连的进行中 Promise
   kind: null,         // 'adb' | 'hdc'
+  log: [],            // HDC 收发日志（失败时显示到输出区）
 };
+
+function pushHdcLog(dir, text) {
+  const d = new Date();
+  const ts = String(d.getHours()).padStart(2, '0') + ':' +
+    String(d.getMinutes()).padStart(2, '0') + ':' +
+    String(d.getSeconds()).padStart(2, '0') + '.' +
+    String(d.getMilliseconds()).padStart(3, '0');
+  STATE.log.push(`${ts} ${dir} ${text}`);
+  if (STATE.log.length > 400) { STATE.log.shift(); }
+}
 
 if (typeof window !== 'undefined') {
   window.addEventListener('pagehide', () => {
@@ -6512,7 +6548,8 @@ async function detach() {
  */
 async function connectHarmony(device) {
   const attempt = async (dev) => {
-    const t = new HdcTransport(dev);
+    STATE.log = [];
+    const t = new HdcTransport(dev, { logger: pushHdcLog });
     try {
       return await connectHarmonyInner(t, dev);
     } catch (e) {
@@ -6537,6 +6574,8 @@ async function connectHarmony(device) {
 }
 
 async function connectHarmonyInner(t, device) {
+  t.emit('INFO', `vid=0x${device.vendorId.toString(16)} pid=0x${device.productId.toString(16)} `
+    + `serial="${device.serialNumber || ''}" 版本=${DAEMON_VERSION}`); 
   const keyPair = await generateKeyPair();
   const hostname = (typeof location !== 'undefined' && location.hostname) ? location.hostname : 'dsh-web';
   const session = new HdcSession(t, {
@@ -6791,6 +6830,8 @@ function MobileBridgeSection(props) {
       const hint = friendly(raw, t, kind);
       // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
       setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
+      // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
+      if (STATE.log && STATE.log.length) { setOut(STATE.log.join('\n')); }
       setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle');
     }
   }
@@ -6813,6 +6854,8 @@ function MobileBridgeSection(props) {
       const hint = friendly(raw, t, kind);
       // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
       setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
+      // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
+      if (STATE.log && STATE.log.length) { setOut(STATE.log.join('\n')); }
     } finally {
       setBusy(false);
     }
@@ -6836,6 +6879,8 @@ function MobileBridgeSection(props) {
       const hint = friendly(raw, t, kind);
       // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
       setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
+      // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
+      if (STATE.log && STATE.log.length) { setOut(STATE.log.join('\n')); }
     } finally {
       setBusy(false);
     }
