@@ -214,3 +214,20 @@ console 每 20 次失败打一次 warn。避免再次静默失败。
 - 等用户把新日志发来，判断是"设备完全不发"还是"发了我们没收到"
 ---
 
+
+## 2026-11-21 21:40 - HDC 日志自动落盘 + 握手变体自动重试
+
+**做了什么：**
+- 宿主 `index.js` 新增 `/api/mobile-bridge/log` 路由：把浏览器上报的 HDC 收发日志
+  追加写入 `~/.dsh/mbridge-hdc.log`（可用 `MOBILE_BRIDGE_HDC_LOG` 覆盖路径）
+- 客户端 `STATE.connection` 保存宿主 RPC 连接；连接失败/成功都 `flushHdcLog()` 上报
+  → **不再需要截屏传日志**
+- `HdcSession` 拆出 `handshake()`；首轮超时后自动换变体（**不发 RESET 直接握手**）再试一次，
+  两种变体在日志里可区分
+- 用插件管理器重载宿主半区（`include:mobile-bridge` disable→enable），
+  实测 `/mbridge/status` 返回 `fetchRoutes: 3`，确认 `/api/mobile-bridge/log` 已注册
+
+**待做什么：**
+- 等真机重试，读 `~/.dsh/mbridge-hdc.log` 判断"设备完全不发"还是"发了我们没收到"
+---
+

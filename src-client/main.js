@@ -44,7 +44,17 @@ const STATE = {
   pending: null,      // 挂载时静默重连的进行中 Promise
   kind: null,         // 'adb' | 'hdc'
   log: [],            // HDC 收发日志（失败时显示到输出区）
+  connection: null,   // 宿主 RPC 连接（用于把 HDC 日志送到宿主落盘）
 };
+
+/** 把 HDC 日志送到宿主写文件，便于直接读取而不必截屏。 */
+async function flushHdcLog() {
+  const conn = STATE.connection;
+  if (!conn || !STATE.log || !STATE.log.length) { return; }
+  try {
+    await conn.rpc.call(BRIDGE, EP + '/log', { lines: STATE.log });
+  } catch { /* 日志上报失败不影响主流程 */ }
+}
 
 function pushHdcLog(dir, text) {
   const d = new Date();
@@ -259,6 +269,7 @@ async function runJob(job) {
  * 但标签页被浏览器挂起（后台节流）时会变慢。
  */
 function startBridge(connection) {
+  STATE.connection = connection;
   let stopped = false;
   DIAG.state = 'polling';
   (async () => {
@@ -383,6 +394,7 @@ function MobileBridgeSection(props) {
         if (!device) { setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle'); return; }
         if (STATE.adb || STATE.hdc) { await detach(); }
         const next = await connectHarmony(device);
+        await flushHdcLog();
         setInfo(next);
         setCmd('param get const.product.model');
         setPhase('connected');
@@ -403,7 +415,10 @@ function MobileBridgeSection(props) {
       // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
       setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
       // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
-      if (STATE.log && STATE.log.length) { setOut(STATE.log.join('\n')); }
+      if (STATE.log && STATE.log.length) {
+        setOut(STATE.log.join('\n'));
+        await flushHdcLog();
+      }
       setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle');
     }
   }
@@ -427,7 +442,10 @@ function MobileBridgeSection(props) {
       // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
       setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
       // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
-      if (STATE.log && STATE.log.length) { setOut(STATE.log.join('\n')); }
+      if (STATE.log && STATE.log.length) {
+        setOut(STATE.log.join('\n'));
+        await flushHdcLog();
+      }
     } finally {
       setBusy(false);
     }
@@ -452,7 +470,10 @@ function MobileBridgeSection(props) {
       // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
       setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
       // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
-      if (STATE.log && STATE.log.length) { setOut(STATE.log.join('\n')); }
+      if (STATE.log && STATE.log.length) {
+        setOut(STATE.log.join('\n'));
+        await flushHdcLog();
+      }
     } finally {
       setBusy(false);
     }

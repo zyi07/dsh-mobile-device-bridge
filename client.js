@@ -6249,6 +6249,22 @@ class HdcSession {
     await this.t.open();
     // 上一次会话（如被 kill 的 hdc server）可能在 IN 端点留下半帧，先清干净
     await this.t.drainIdle({ timeoutMs: 120, rounds: 20 });
+
+    try {
+      return await this.handshake({ resetFirst, resetSettleMs });
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e);
+      if (!/等待应答|超时/.test(msg)) { throw e; }
+      // 变体：不发 RESET，直接再握一次手。
+      // 有些状态下 daemon 会因为刚被 RESET 而不再重建会话，直接握手反而能进
+      // "New session coming" 分支。两种都试，日志里能看清哪种有回音。
+      this.t.emit('INFO', '变体：本次不发 RESET，直接重新握手');
+      await this.t.drainIdle({ timeoutMs: 120, rounds: 10 });
+      return await this.handshake({ resetFirst: false, resetSettleMs: 0 });
+    }
+  }
+
+  async handshake({ resetFirst = true, resetSettleMs = 150 } = {}) {
     if (resetFirst) {
       await this.t.reset();
       await sleep$1(resetSettleMs);
@@ -6268,8 +6284,6 @@ class HdcSession {
 
     for (let step = 0; step < 6; step++) {
       let pkt = await this.t.readPacket({ timeoutMs: 8000 });
-      // 首帧没回音时重发一次：设备可能仍处在"上一个会话未完全清理"的状态，
-      // 重发能让 daemon 走 "New session coming" 分支。
       if (!pkt && step === 0) {
         this.t.emit('INFO', '首帧无应答，重发第 1 帧一次');
         await this.t.drainIdle({ timeoutMs: 100, rounds: 5 });
@@ -6472,7 +6486,17 @@ const STATE = {
   pending: null,      // 挂载时静默重连的进行中 Promise
   kind: null,         // 'adb' | 'hdc'
   log: [],            // HDC 收发日志（失败时显示到输出区）
+  connection: null,   // 宿主 RPC 连接（用于把 HDC 日志送到宿主落盘）
 };
+
+/** 把 HDC 日志送到宿主写文件，便于直接读取而不必截屏。 */
+async function flushHdcLog() {
+  const conn = STATE.connection;
+  if (!conn || !STATE.log || !STATE.log.length) { return; }
+  try {
+    await conn.rpc.call(BRIDGE, EP + '/log', { lines: STATE.log });
+  } catch { /* 日志上报失败不影响主流程 */ }
+}
 
 function pushHdcLog(dir, text) {
   const d = new Date();
@@ -6687,6 +6711,7 @@ async function runJob(job) {
  * 但标签页被浏览器挂起（后台节流）时会变慢。
  */
 function startBridge(connection) {
+  STATE.connection = connection;
   let stopped = false;
   DIAG.state = 'polling';
   (async () => {
@@ -6811,6 +6836,7 @@ function MobileBridgeSection(props) {
         if (!device) { setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle'); return; }
         if (STATE.adb || STATE.hdc) { await detach(); }
         const next = await connectHarmony(device);
+        await flushHdcLog();
         setInfo(next);
         setCmd('param get const.product.model');
         setPhase('connected');
@@ -6831,7 +6857,10 @@ function MobileBridgeSection(props) {
       // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
       setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
       // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
-      if (STATE.log && STATE.log.length) { setOut(STATE.log.join('\n')); }
+      if (STATE.log && STATE.log.length) {
+        setOut(STATE.log.join('\n'));
+        await flushHdcLog();
+      }
       setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle');
     }
   }
@@ -6855,7 +6884,10 @@ function MobileBridgeSection(props) {
       // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
       setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
       // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
-      if (STATE.log && STATE.log.length) { setOut(STATE.log.join('\n')); }
+      if (STATE.log && STATE.log.length) {
+        setOut(STATE.log.join('\n'));
+        await flushHdcLog();
+      }
     } finally {
       setBusy(false);
     }
@@ -6880,7 +6912,10 @@ function MobileBridgeSection(props) {
       // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
       setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
       // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
-      if (STATE.log && STATE.log.length) { setOut(STATE.log.join('\n')); }
+      if (STATE.log && STATE.log.length) {
+        setOut(STATE.log.join('\n'));
+        await flushHdcLog();
+      }
     } finally {
       setBusy(false);
     }

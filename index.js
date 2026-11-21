@@ -210,12 +210,30 @@ export function apply(ctx) {
       return okValue({ accepted: settle(payload.id, payload) });
     });
 
+    // 浏览器把 HDC 收发日志送到这里落盘，方便智能体直接读取而不必截屏。
+    const logRoute = rpcRoute(async (method, payload) => {
+      diag.fetchCalls += 1;
+      diag.lastMethod = method;
+      lastSeen = now();
+      const lines = Array.isArray(payload.lines) ? payload.lines : [];
+      const file = process.env.MOBILE_BRIDGE_HDC_LOG
+        || path.join(process.env.HOME || '/root', '.dsh', 'mbridge-hdc.log');
+      try {
+        fs.appendFileSync(file, lines.map((l) => String(l)).join('\n') + '\n', 'utf8');
+        return okValue({ file, written: lines.length });
+      } catch (e) {
+        return fail('write-failed', String(e && e.message ? e.message : e));
+      }
+    });
+
     // path 到底要不要带 /api 前缀，文档与实现字面不一致，两种都注册。
     const paths = [
       ['/api/mobile-bridge/poll', pollRoute],
       ['/mobile-bridge/poll', pollRoute],
       ['/api/mobile-bridge/result', resultRoute],
       ['/mobile-bridge/result', resultRoute],
+      ['/api/mobile-bridge/log', logRoute],
+      ['/mobile-bridge/log', logRoute],
     ];
 
     connCtx.effect(() => {

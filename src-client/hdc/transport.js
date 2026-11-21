@@ -349,6 +349,22 @@ export class HdcSession {
     await this.t.open();
     // 上一次会话（如被 kill 的 hdc server）可能在 IN 端点留下半帧，先清干净
     await this.t.drainIdle({ timeoutMs: 120, rounds: 20 });
+
+    try {
+      return await this.handshake({ resetFirst, resetSettleMs });
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e);
+      if (!/等待应答|超时/.test(msg)) { throw e; }
+      // 变体：不发 RESET，直接再握一次手。
+      // 有些状态下 daemon 会因为刚被 RESET 而不再重建会话，直接握手反而能进
+      // "New session coming" 分支。两种都试，日志里能看清哪种有回音。
+      this.t.emit('INFO', '变体：本次不发 RESET，直接重新握手');
+      await this.t.drainIdle({ timeoutMs: 120, rounds: 10 });
+      return await this.handshake({ resetFirst: false, resetSettleMs: 0 });
+    }
+  }
+
+  async handshake({ resetFirst = true, resetSettleMs = 150 } = {}) {
     if (resetFirst) {
       await this.t.reset();
       await sleep(resetSettleMs);
@@ -368,8 +384,6 @@ export class HdcSession {
 
     for (let step = 0; step < 6; step++) {
       let pkt = await this.t.readPacket({ timeoutMs: 8000 });
-      // 首帧没回音时重发一次：设备可能仍处在"上一个会话未完全清理"的状态，
-      // 重发能让 daemon 走 "New session coming" 分支。
       if (!pkt && step === 0) {
         this.t.emit('INFO', '首帧无应答，重发第 1 帧一次');
         await this.t.drainIdle({ timeoutMs: 100, rounds: 5 });
