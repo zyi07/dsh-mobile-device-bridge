@@ -2,7 +2,7 @@ import React from 'react';
 import { Adb, AdbDaemonTransport } from '@yume-chan/adb';
 import { AdbDaemonWebUsbDeviceManager } from '@yume-chan/adb-daemon-webusb';
 import AdbWebCredentialStore from '@yume-chan/adb-credential-web';
-import { HdcTransport, HdcSession } from './hdc/transport.js';
+import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
 import { generateKeyPair as hdcGenerateKeyPair } from './hdc/session.js';
 
 export const inject = ['slots', 'locale'];
@@ -14,9 +14,12 @@ const h = React.createElement;
  * 把 Tango / WebUSB 的英文异常翻译成可执行的下一步。
  * 认不出来的原样返回，便于贴到 Console 里排查。
  */
-export function friendly(raw, t) {
-  if (/already in use[d]? by another program/i.test(raw)) return t('errBusy');
-  if (/unable to claim interface|access denied|not allowed/i.test(raw)) return t('errDriver');
+export function friendly(raw, t, kind = 'adb') {
+  if (/already in use[d]? by another program|device in use|resource busy/i.test(raw)) return t('errBusy');
+  // 浏览器接管接口失败：Android 侧通常是驱动问题；HarmonyOS 侧几乎总是 hdc server 占着
+  if (/claim interface|failed to claim|unable to claim|access denied|not allowed|security/i.test(raw)) {
+    return kind === 'hdc' ? t('errHdcBusy') : t('errDriver');
+  }
   if (/no device selected|no device/i.test(raw)) return '';
   if (/user gesture/i.test(raw)) return t('errGesture');
   return '';
@@ -103,6 +106,16 @@ async function detach() {
  */
 async function connectHarmony(device) {
   const t = new HdcTransport(device);
+  try {
+    return await connectHarmonyInner(t, device);
+  } catch (e) {
+    // 失败必须释放：否则设备句柄留在 open 状态，之后每次 claim 都会失败
+    try { await t.close(); } catch { /* ignore */ }
+    throw e;
+  }
+}
+
+async function connectHarmonyInner(t, device) {
   const keyPair = await hdcGenerateKeyPair();
   const hostname = (typeof location !== 'undefined' && location.hostname) ? location.hostname : 'dsh-web';
   const session = new HdcSession(t, {
@@ -354,7 +367,9 @@ function MobileBridgeSection(props) {
       setPhase('connected');
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
-      setError(friendly(raw, t) || raw);
+      const hint = friendly(raw, t, kind);
+      // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
+      setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
       setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle');
     }
   }
@@ -374,7 +389,9 @@ function MobileBridgeSection(props) {
       setOut(await execShell(cmd));
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
-      setError(friendly(raw, t) || raw);
+      const hint = friendly(raw, t, kind);
+      // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
+      setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
     } finally {
       setBusy(false);
     }
@@ -395,7 +412,9 @@ function MobileBridgeSection(props) {
       window.open(url, '_blank');
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
-      setError(friendly(raw, t) || raw);
+      const hint = friendly(raw, t, kind);
+      // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
+      setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
     } finally {
       setBusy(false);
     }
@@ -434,6 +453,19 @@ function MobileBridgeSection(props) {
         disabled: !!STATE.adb || !!STATE.hdc,
         onClick: () => { setKind('hdc'); },
       }, t('kindHdc')),
+      h('button', {
+        key: 'diag',
+        className: 'mb-btn',
+        onClick: async () => {
+          setError('');
+          try {
+            const d = await diagnoseUsb();
+            setOut('USB 诊断：\n' + JSON.stringify(d, null, 2));
+          } catch (e) {
+            setError(String(e && e.message ? e.message : e));
+          }
+        },
+      }, t('diagnose')),
       h('button', {
         key: 'c',
         className: 'mb-btn mb-btn--primary',
@@ -520,6 +552,7 @@ export function apply(ctx) {
       copied: '已复制',
       copyFailed: '复制失败：浏览器拒绝了剪贴板写入，请手动选中输出复制。',
       os: '系统',
+      diagnose: '诊断',
       kindLabel: '设备类型',
       kindAdb: 'Android',
       kindHdc: 'HarmonyOS',
@@ -534,6 +567,7 @@ export function apply(ctx) {
       reconnectingHint: '检测到之前授权过的设备，正在用已保存的 RSA 密钥自动重连，不需要再点按钮。',
       noWebusb: '当前浏览器不支持 WebUSB。请使用 Chrome 或 Edge 打开本页面。',
       errBusy: '手机已被另一个程序占用（这一步是浏览器拿到了 USB 设备，但接口被抢占）。\n请在你自己电脑上依次做：\n1) 关掉 adb 服务：adb kill-server（Windows 任务管理器里结束 adb.exe）\n2) 退出 Android Studio、scrcpy、华为 HiSuite、各类手机助手\n3) 拔掉数据线再插回去，保持屏幕解锁\n4) 回到这里重新点「连接设备」',
+      errHdcBusy: '浏览器无法接管 HDC 接口——几乎总是因为这台电脑上的 hdc server 正占着它（DevEco Studio 会自动拉起 hdc）。\n请在该电脑上依次做：\n1) 执行 hdc kill（或在任务管理器里结束 hdc.exe）\n2) 关闭 DevEco Studio / 手机助手 / HiSuite\n3) 拔掉数据线再插回去，保持屏幕解锁\n4) 回到这里重新点「连接设备」\n若 hdc kill 后仍失败，才是驱动问题（该 HDC 接口未绑定 WinUSB）。',
       errDriver: '浏览器无法接管该 USB 接口，通常是手机在 Windows 上绑的是 MTP/厂商驱动而不是 WinUSB。\n请在电脑上安装 Google Android USB Driver，或在设备管理器里把该设备的驱动改为 WinUSB，然后重新插拔。',
       errGesture: '浏览器要求由点击触发设备选择，请直接点「连接设备」按钮，不要通过脚本调用。',
       hint: '连接会跟着页面保留：关掉设置、切到别的页再回来都不用重连；刷新页面则会断开，之后会自动尝试恢复。需要在手机上开启「USB 调试」，首次连接时手机会弹出授权提示。同一时刻只能有一个程序占用 USB，请先停掉本机的 adb server、Android Studio、scrcpy 等。',
@@ -549,6 +583,7 @@ export function apply(ctx) {
       copied: 'Copied',
       copyFailed: 'Copy failed: the browser refused clipboard access. Select the output and copy manually.',
       os: 'OS',
+      diagnose: 'Diagnose',
       kindLabel: 'Device type',
       kindAdb: 'Android',
       kindHdc: 'HarmonyOS',
@@ -563,6 +598,7 @@ export function apply(ctx) {
       reconnectingHint: 'A previously authorized device was found; reconnecting with the stored RSA key, no click needed.',
       noWebusb: 'This browser has no WebUSB support. Open this page in Chrome or Edge.',
       errBusy: 'The phone is held by another program: the browser reached the USB device but could not claim the interface.\nOn your own computer:\n1) stop the adb server: adb kill-server (or end adb.exe in Task Manager)\n2) quit Android Studio, scrcpy, HiSuite and phone-assistant tools\n3) unplug and replug the cable, keep the screen unlocked\n4) click "Connect device" again',
+      errHdcBusy: 'The browser cannot claim the HDC interface. This is almost always because the hdc server on this computer is holding it (DevEco Studio starts hdc automatically).\nOn that computer:\n1) run hdc kill (or end hdc.exe in Task Manager)\n2) quit DevEco Studio / HiSuite / phone-assistant tools\n3) unplug and replug the cable, keep the screen unlocked\n4) click "Connect device" again\nIf it still fails after hdc kill, then it is a driver problem (HDC interface not bound to WinUSB).',
       errDriver: 'The browser cannot take over this USB interface. On Windows the phone is usually bound to the MTP/vendor driver instead of WinUSB.\nInstall the Google Android USB Driver, or switch the device driver to WinUSB in Device Manager, then replug.',
       errGesture: 'The browser requires a click to open the device chooser. Press the "Connect device" button directly.',
       hint: 'The connection survives closing settings or switching tabs; a page refresh drops it and triggers an automatic restore attempt. Enable USB debugging on the phone; the first connection asks for authorization on the device. Only one program can hold the USB interface, so stop the local adb server, Android Studio, and scrcpy first.',

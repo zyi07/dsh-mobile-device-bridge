@@ -132,7 +132,23 @@ export class HdcTransport {
       await d.selectConfiguration(cfg.configurationValue);
     }
     this.iface = findHdcInterface(d);
-    await d.claimInterface(this.iface.interfaceNumber);
+    try {
+      await d.claimInterface(this.iface.interfaceNumber);
+    } catch (e) {
+      // 保留原始信息：WebUSB 抛的是 DOMException，name/message 才是诊断依据
+      const desc =
+        `claimInterface(${this.iface.interfaceNumber}) 失败`
+        + ` [class=0x${IFACE_CLASS.toString(16)} sub=0x${IFACE_SUBCLASS.toString(16)}`
+        + ` proto=0x${IFACE_PROTOCOL.toString(16)} in=0x${this.iface.endpointIn.toString(16)}`
+        + ` out=0x${this.iface.endpointOut.toString(16)}]`;
+      // 关键：失败也要把设备句柄关掉。WebUSB 里 open() 会占住设备，
+      // 泄漏的句柄会让后续每次 claimInterface 都报 "Unable to claim interface"。
+      try { await d.close(); } catch { /* ignore */ }
+      const err = new Error(`${desc} → ${e && e.name ? e.name : 'Error'}: ${e && e.message ? e.message : e}`);
+      err.cause = e;
+      err.diagnostic = await diagnoseUsb().catch(() => null);
+      throw err;
+    }
     this.opened = true;
     return this.iface;
   }
@@ -336,4 +352,69 @@ export class HdcSession {
 
 function decodeText(bytes) {
   try { return new TextDecoder().decode(bytes); } catch { return ''; }
+}
+/**
+ * 诊断：把 Chrome 眼里的设备/接口状态打出来。
+ * `claimed` 特别关键——它由本页或别的页持有，能直接回答"接口是不是被占着"。
+ */
+export async function diagnoseUsb() {
+  if (typeof navigator === 'undefined' || !navigator.usb) {
+    return { ok: false, error: '当前浏览器没有 WebUSB' };
+  }
+  let devices;
+  try { devices = await navigator.usb.getDevices(); } catch (e) {
+    return { ok: false, error: 'getDevices 失败: ' + (e && e.message) };
+  }
+  const out = [];
+  for (const d of devices) {
+    const entry = {
+      vid: '0x' + d.vendorId.toString(16),
+      pid: '0x' + d.productId.toString(16),
+      serial: d.serialNumber || '',
+      opened: !!d.opened,
+      productName: d.productName || '',
+      interfaces: d.configuration
+        ? d.configuration.interfaces.map((i) => {
+            const a = i.alternate;
+            return {
+              interfaceNumber: i.interfaceNumber,
+              claimed: !!i.claimed,
+              class: '0x' + a.interfaceClass.toString(16),
+              subclass: '0x' + a.interfaceSubclass.toString(16),
+              protocol: '0x' + a.interfaceProtocol.toString(16),
+              endpoints: a.endpoints.map(
+                (e) => `${e.direction}:${e.endpointNumber}:${e.type}:pk${e.packetSize}`,
+              ),
+            };
+          })
+        : null,
+    };
+    // 现场试一次 claim：这是判断"环境问题 vs 我们代码问题"的决定性证据
+    entry.claimTest = await probeClaim(d);
+    out.push(entry);
+  }
+  return { ok: true, count: devices.length, devices: out };
+}
+
+/** 打开→选配置→尝试 claim→释放→关闭；只报告结论，不改设备状态。 */
+async function probeClaim(device) {
+  let openedHere = false;
+  let claimed = false;
+  let target = null;
+  try {
+    if (!device.opened) { await device.open(); openedHere = true; }
+    if (!device.configuration) {
+      const cfg = device.configurations && device.configurations[0];
+      if (cfg) { await device.selectConfiguration(cfg.configurationValue); }
+    }
+    target = findHdcInterface(device);
+    await device.claimInterface(target.interfaceNumber);
+    claimed = true;
+    return 'ok';
+  } catch (e) {
+    return `${(e && e.name) || 'Error'}: ${(e && e.message) || e}`;
+  } finally {
+    if (claimed) { try { await device.releaseInterface(target.interfaceNumber); } catch { /* ignore */ } }
+    if (openedHere) { try { await device.close(); } catch { /* ignore */ } }
+  }
 }

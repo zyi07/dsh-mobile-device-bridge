@@ -127,3 +127,21 @@
 **加诊断**：模块级 `DIAG`（state/polls/lastOk/error/injected），
 面板底部显示一行「桥接 … · connection=… · 轮询 N 次 · 错误 …」，
 console 每 20 次失败打一次 warn。避免再次静默失败。
+
+## 2026-11-21 12:30 - 修 WebUSB 设备句柄泄漏 + 诊断按钮实测 claim
+
+**做了什么：**
+- 真机首次连接报 `NetworkError: Unable to claim interface`，排查中发现真 bug：
+  `connectHarmony()` 失败时没有关闭已 `open()` 的设备句柄，泄漏后每次 claim 都失败
+  （`src-client/main.js`、`src-client/hdc/transport.js`）
+- claim 失败时保留原始 `DOMException` 的 name/message 与接口信息，UI 同时显示
+  「友好建议 + 原始错误」
+- 新增 `diagnoseUsb()`：列出 Chrome 眼里的设备/接口/`claimed` 状态，并**现场实测一次
+  claim**（打开→claim→释放→关闭），据此区分「环境占用/驱动」与「我们代码」问题
+- 面板新增「诊断」按钮
+- 剔除误导文案：HDC 的 claim 失败不再提示 Android 的 WinUSB/Google 驱动方案
+
+**待做什么：**
+- 等用户在真机点「诊断」，据 `claimTest` 结果决定：关占用进程 / Zadig 绑 WinUSB / 修代码
+---
+
