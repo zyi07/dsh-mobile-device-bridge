@@ -202,6 +202,18 @@ export function decodeFrame(input) {
   const payload = bytes.slice(HEAD_SIZE + headSize, need);
   const head = decodeFields(headBytes);
 
+  // ⚠️ 负载**不一定是 protobuf**：
+  //   · 握手帧的负载是 protobuf（需要 fields）
+  //   · 命令帧的负载是纯文本（无 framing）
+  //   · 通道关闭帧的负载是 1 字节裸值 0x00/0x01
+  // 所以这里做容错解析，解不出就置 null，由调用方按 commandFlag 决定怎么读。
+  let payloadFields = null;
+  try {
+    payloadFields = decodeFields(payload);
+  } catch {
+    payloadFields = null;
+  }
+
   return {
     protocolVer,
     headSize,
@@ -212,7 +224,7 @@ export function decodeFrame(input) {
     checkSum: head[3],
     vCode: head[4],
     payload,
-    fields: decodeFields(payload),
+    fields: payloadFields,
   };
 }
 

@@ -371,3 +371,63 @@ daemon 把 `header->sessionId` 与自身会话 id 比较，不一致就**当作�
 
 `tools/hdc_probe5.py` 即按 H1/H2 做对照（P1 对照 / P2 RESET 先行 / P4 正确 sid + 常驻读 / P3 等超时）。
 其 `classify()` 会把入站包判成 `heartbeat` / `handshake?`，避免再把心跳误报成 token。
+
+## 第六轮：AUTH 全链已用真 hdc 的字节验证（2026-11-21）
+
+执行 Agent 在**无管理员权限**下改用 **libusb 代理 DLL**（自写 `usb_shim.c` 导出 hdc.exe
+import 的 24 个 libusb 函数、替换 `bulk_transfer`/`submit_transfer` 等 4 个、其余转发），
+让**真 `hdc.exe`** 在一次完整会话里把收发字节全录下来。等价于 USBPcap 的应用层视图。
+
+### 六步实证（每一帧都用本仓库 codec 独立解过，长度全部自洽）
+
+| 步 | 方向 | 帧长 | `f2 authType` | `f3` | `f4 connectKey` | `f5 buf` |
+|---|---|---|---|---|---|---|
+| 0 | H→D | 11 | — | — | — | `USBHead(option=2/RESET, len=0)` |
+| 1 | H→D | 180 | 0 `NONE` | **636423625** | `DSHDEVICE0000001` | 94B 特征串 |
+| 2 | D→H | 99 | 3 `PUBLICKEY` | 0 | 空 | 33B `authtype        1               1` |
+| 3 | H→D | 708 | 3 | 0 | 空 | **641B = 主机名 + `0x0C` + PEM** |
+| 4 | D→H | 86 | 2 `SIGNATURE` | 0 | 空 | **20B token（纯 ASCII）** |
+| 5 | H→D | 579 | 2 | 0 | 空 | **512 字符 base64 签名（=384 字节）** |
+| 6 | D→H | 270 | 4 `AUTH_OK` | 0 | 空 | 203B，含 `SUCCESS` |
+
+关键：**会话 id 由主机随机生成**，同一个值同时写进 `USBHead.sessionId` 与握手 `f3`
+（实测 `0x25EF0DC9 = 636423625`）。这一点与早期"用 daemon 广播的 sid"完全相反。
+
+### 修正前几轮的错误假设
+
+| 早期假设 | 实证结果 |
+|---|---|
+| 公钥放 `connectKey(f4)`、格式 `ssh-rsa AAAA…` | ❌ 公钥在 **`f5(buf)`**，且是 **PEM**（`-----BEGIN PUBLIC KEY-----`） |
+| 第一帧 `f5` 是空 | ❌ 是 94 字节特征串：`authtype 1 1supportfeatures 29 Ver: 3.2.0f,USB,win,heartbeat` |
+| `connectKey` 每步都填序列号 | ❌ 只有第 1 帧填；AUTH 阶段为空 |
+| token 是二进制 | ❌ 是 **20 个 ASCII 字符** |
+| 只有设备发心跳 | ❌ **双向**，主机每 ~5s 也发 `commandFlag=5000` |
+
+### 命令通道（同一次抓包内实证）
+
+| 项 | 实测 |
+|---|---|
+| 命令帧 | `commandFlag=1001`（`CMD_UNITY_EXECUTE`），`channelId` **非 0 随机**（如 1309532605） |
+| 命令负载 | 纯文本，**不带 `\0`**：`echo shim_probe3` |
+| 输出帧 | `commandFlag=10`，负载带 `\n`：`7368696d5f70726f6265330a` |
+| 结束 | `commandFlag=2` + 1 字节：主机发 `00`，设备回 `01` |
+
+### 由此修掉的一个 codec bug
+
+`decodeFrame` 原先**无条件把负载当 protobuf 解**。但负载并非总是 protobuf：
+握手帧是，命令帧是纯文本，关闭帧是 1 字节裸值。现在改为容错解析
+（解不出置 `null`，由 `commandFlag` 决定怎么读）。
+
+### 已落地的代码与验证
+
+- `src-client/hdc/session.js`：握手六步状态机 + 命令帧 + 心跳 + PEM/签名
+- `src-client/hdc/fixtures.json`：真机六帧 + 命令帧 + 心跳帧（原始 hex）
+- `src-client/hdc/session.test.mjs`：**用真机帧逐字节复现** step1/step3/step5/命令帧/心跳帧，
+  并解析 daemon 三个应答，再让状态机沿真实应答走完全程（WebCrypto 生成的签名恰为 384 字节）
+- `node session.test.mjs` → 全绿
+
+### 仍未做（剩下的是接线，不是协议）
+
+1. `hdc/transport.js`：浏览器 WebUSB 打开设备 + 读写 `0x81/0x01` + 11B 头/帧分两次写
+2. 把 `HdcClient` 接到插件 UI 与宿主桥（与 `AdbClient` 同一 `DeviceClient` 接口）
+3. 真机端到端验证（bash 一条 `echo` + 截图）
