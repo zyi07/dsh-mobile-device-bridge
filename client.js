@@ -6729,7 +6729,22 @@ function hexOf(bytes, limit = 256) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r51';
+const BUILD_TAG = 'r52';
+
+/** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
+const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
+
+function readStoredHdcKey() {
+  try { return localStorage.getItem(HDC_KEY_STORE) || ''; } catch { return ''; }
+}
+
+function storeHdcKey(pem) {
+  try { localStorage.setItem(HDC_KEY_STORE, pem); return true; } catch { return false; }
+}
+
+function clearStoredHdcKey() {
+  try { localStorage.removeItem(HDC_KEY_STORE); return true; } catch { return false; }
+}
 
 const inject = ['slots', 'locale'];
 
@@ -6890,18 +6905,34 @@ async function connectHarmony(device) {
 async function connectHarmonyInner(t, device) {
   t.emit('INFO', `vid=0x${device.vendorId.toString(16)} pid=0x${device.productId.toString(16)} `
     + `serial="${device.serialNumber || ''}" 版本=${DAEMON_VERSION}`); 
-  // 有粘贴的 hdc 私钥就复用它（该密钥已被设备信任，可免上机确认）；否则现场生成
+  // 密钥优先级：粘贴的 hdc 私钥 > 浏览器里保存过的 > 新生成（生成后立即保存）
   let keyPair = null;
   let publicKeyPem = null;
-  if (STATE.hdcKeyText && STATE.hdcKeyText.trim()) {
-    t.emit('INFO', '使用粘贴的 hdc 私钥（复用已授权密钥）');
-    const imported = await importHdcKey(STATE.hdcKeyText);
+  const pasted = (STATE.hdcKeyText || '').trim();
+  const stored = readStoredHdcKey();
+
+  if (pasted) {
+    t.emit('INFO', '使用粘贴的 hdc 私钥（复用设备已信任的密钥）');
+    const imported = await importHdcKey(pasted);
     keyPair = { privateKey: imported.privateKey };
     publicKeyPem = imported.publicKeyPem;
-    t.emit('INFO', `公钥 PEM ${publicKeyPem.length}B, 首行=${publicKeyPem.split('\n')[0]}`);
+    t.emit('INFO', `公钥 PEM ${publicKeyPem.length}B`);
+  } else if (stored) {
+    t.emit('INFO', '复用浏览器里已保存的密钥（若已授权则无需再确认）');
+    const imported = await importHdcKey(stored);
+    keyPair = { privateKey: imported.privateKey };
+    publicKeyPem = imported.publicKeyPem;
   } else {
     keyPair = await generateKeyPair();
-    t.emit('INFO', '使用现场生成的 RSA-3072 密钥（首次需在手机上确认）');
+    // 立刻导出保存：这样重试与下次连接都用同一把，授权只需做一次
+    const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey));
+    let bin = '';
+    for (const b of pkcs8) { bin += String.fromCharCode(b); }
+    const b64 = btoa(bin).replace(/(.{64})/g, '$1\n').replace(/\n$/, '');
+    const pem = '-----BEGIN PRIVATE KEY-----\n' + b64 + '\n-----END PRIVATE KEY-----\n';
+    const saved = storeHdcKey(pem);
+    t.emit('INFO', `已生成并保存新的 RSA-3072 密钥（${saved ? '已存入浏览器' : '保存失败，仅本次有效'}）；`
+      + '首次需在手机上点「允许」，之后同一把密钥不再重复确认');
   }
   const hostname = (typeof location !== 'undefined' && location.hostname) ? location.hostname : 'dsh-web';
   const session = new HdcSession(t, {
@@ -7321,6 +7352,19 @@ function MobileBridgeSection(props) {
   children.push(h('details', { key: 'key', className: 'mb-note', style: { marginTop: '10px' } },
     h('summary', { style: { cursor: 'pointer', userSelect: 'none' } }, t('hdcKeyTitle')),
     h('div', { style: { marginTop: '6px', lineHeight: 1.6 } }, t('hdcKeyHint')),
+    h('div', { style: { marginTop: '6px' } },
+      h('button', {
+        className: 'mb-btn',
+        onClick: () => {
+          const ok = clearStoredHdcKey();
+          setKeyText('');
+          STATE.hdcKeyText = '';
+          setOut(ok ? '已清除浏览器里保存的密钥，下次连接会生成新密钥（需在手机上重新允许一次）'
+                    : '清除失败（无保存的密钥）');
+        },
+      }, t('hdcKeyReset')),
+      h('span', { className: 'mb-note', style: { marginLeft: '8px' } }, t('hdcKeyStored')),
+    ),
     h('textarea', {
       className: 'mb-in',
       rows: 5,
@@ -7412,7 +7456,9 @@ function apply(ctx) {
       copyFailed: '复制失败：浏览器拒绝了剪贴板写入，请手动选中输出复制。',
       os: '系统',
       diagnose: '诊断',
-      hdcKeyTitle: '已有 HDC 私钥（可选，可免除手机确认）',
+      hdcKeyTitle: '密钥设置（默认已自动保存，无需操作）',
+      hdcKeyReset: '重置密钥',
+      hdcKeyStored: '默认会保存一把密钥并复用，授权只需做一次；只有想换密钥时才需要点重置',
       hdcKeyHint: '如果你的电脑上 hdc 已经能连上这台手机，说明它的密钥已被设备信任。把这两个文件的内容一起粘贴进来（先私钥再公钥）：\nC:\\Users\\<你>\\.harmony\\hdckey  和  hdckey.pub\n提取方法（PowerShell）：Get-Content -Raw "$env:USERPROFILE\\.harmony\\hdckey"; Get-Content -Raw "$env:USERPROFILE\\.harmony\\hdckey.pub"',
       kindLabel: '设备类型',
       kindAdb: 'Android',
@@ -7446,7 +7492,9 @@ function apply(ctx) {
       copyFailed: 'Copy failed: the browser refused clipboard access. Select the output and copy manually.',
       os: 'OS',
       diagnose: 'Diagnose',
-      hdcKeyTitle: 'Existing HDC private key (optional, skips phone confirmation)',
+      hdcKeyTitle: 'Key settings (a key is generated and saved automatically)',
+      hdcKeyReset: 'Reset key',
+      hdcKeyStored: 'The generated key is kept and reused, so authorization is needed once. Reset only if you want a new key.',
       hdcKeyHint: 'If hdc already connects to this phone from this PC, that key is trusted. Paste both files (private key first, then public key).',
       kindLabel: 'Device type',
       kindAdb: 'Android',
