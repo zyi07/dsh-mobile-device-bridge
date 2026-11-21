@@ -335,3 +335,39 @@ HW : 48 57 00 00 01 00 08 00 00 00 1F
 若成立，则 auth 流程为：
 `AUTH_NONE(0) → daemon 回 AUTH_PUBLICKEY(3) → 客户端送公钥 → daemon 回 token → 客户端送签名 → AUTH_OK(4)`。
 `tools/hdc_probe4.py` 即按此流程推进，并把收到的每个包原样记录以待核对。
+
+## 第五轮结果（2026-11-21 凌晨）
+
+### 第三个根因 R3：`USBHead.sessionId` 必须等于 daemon 当前会话 id
+
+```
+[CheckPacketOption:165] CheckPacketOption softreset
+    header->sessionId:0*0  sessionId:154******913(L:10)
+[SendToHdcStream:189] SendToHdcStream softreset dataSize:66 payloadSize:0 childRet:0
+```
+
+daemon 把 `header->sessionId` 与自身会话 id 比较，不一致就**当作主机发来的 softreset**
+并丢弃负载（`payloadSize:0`）。`hdc_probe4.py` 的 Step 0 已学到 `dev_sid` 却硬编码发 0，
+这是失败原因。改用它学到的 sid 后，`CheckPacketOption softreset` 消失。
+
+### 新增硬事实：daemon 按 512 字节分块读 OUT
+
+```
+[SendToHdcStream:189] ... dataSize:512 payloadSize:0
+[SendToHdcStream:189] ... dataSize:179 payloadSize:0
+```
+
+691 字节的 S2 帧被读成 512 + 179（合计 691 ✅）。发送侧不必自己切，但读取侧要能容忍分块。
+
+### 当前唯一剩余阻塞
+
+`[SendUSBBlock:91] SendUSBRaw index failed` —— daemon 想回包但**发送失败**，
+因此拿不到 token。两个待验证假设：
+
+- **H1 主机侧读饥饿**：daemon 回包时主机没有 pending 的 IN URB。
+  对策：常驻读线程，让 IN 端点始终有未完成传输。
+- **H2 会话生命周期**：daemon 仍持有上一次真 hdc 留下的旧会话，状态陈旧。
+  对策：先发 `OPT_RESET` 再握手；或等旧会话自然超时后再握手。
+
+`tools/hdc_probe5.py` 即按 H1/H2 做对照（P1 对照 / P2 RESET 先行 / P4 正确 sid + 常驻读 / P3 等超时）。
+其 `classify()` 会把入站包判成 `heartbeat` / `handshake?`，避免再把心跳误报成 token。
