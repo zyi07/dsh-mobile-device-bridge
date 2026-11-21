@@ -197,6 +197,8 @@ def main():
     ap.add_argument("--vid", default="12D1")
     ap.add_argument("--pid", default="1101")
     ap.add_argument("--libusb", default=None)
+    ap.add_argument("--passive", type=float, default=0,
+                    help="只被动监听 N 秒（不发任何数据），看设备是否自发心跳")
     args = ap.parse_args()
 
     usb = Usb(find_dll(args.libusb))
@@ -208,6 +210,16 @@ def main():
         return 2
 
     try:
+        if args.passive > 0:
+            log(f"### 纯被动监听 {args.passive:.0f} 秒（一个字节都不发）###")
+            n = drain(usb, h, args.passive, "passive")
+            log(f"\n→ 收到 {n} 个包")
+            if n:
+                log("设备在主动发送数据 → daemon 正常，我们的 WebUSB 读法有问题")
+            else:
+                log("设备完全静默 → 设备侧不发数据（与 WebUSB 无关）")
+            return 0
+
         n1 = run(usb, h, CAPTURED_SID, "V1 抓包 sid")
         n2 = run(usb, h, random.randint(1, 0xFFFFFFFF), "V2 随机 sid")
         log("\n==================== 汇总 ====================")
