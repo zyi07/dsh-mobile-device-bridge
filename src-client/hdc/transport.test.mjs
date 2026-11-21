@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs';
 import { createFakeHdcDevice } from './fake-device.mjs';
 import { HdcTransport, HdcSession, OPT_RESET } from './transport.js';
 import { generateKeyPair } from './session.js';
+import * as S from './session.js';
 
 const F = JSON.parse(readFileSync(new URL('./fixtures.json', import.meta.url), 'utf8'));
 
@@ -145,6 +146,18 @@ const F = JSON.parse(readFileSync(new URL('./fixtures.json', import.meta.url), '
   assert.equal(Buffer.from(pkt2.frame).toString('hex').toUpperCase(), F.step2_dev_to_host);
 
   console.log(`9. 读取侧重同步：跳过 ${garbage.length}B 残包后正确还原，伪 magic 也不误判 ✓`);
+}
+
+
+// ---------------------------------------------------------------- 10. AUTH 后关闭通道 0
+
+{
+  // 真机抓包 T+250：主机在 AUTH_OK 之后第一件事是关闭通道 0（flag=2, payload 0x00）
+  const capturedClose = '4857000001000800000001080010021800200900';
+  const mine = [...S.buildCloseFrame({ channelId: 0, side: 'host' })]
+    .map((b) => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+  assert.equal(mine, capturedClose, '关闭通道 0 的帧必须与真机一致');
+  console.log('10. AUTH 后关闭通道 0：帧与真机逐字节一致（flag=2 / payload 0x00）✓');
 }
 
 console.log('RESULT: 传输层 + 会话层（离线回放真机字节）全部通过');

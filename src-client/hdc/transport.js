@@ -547,6 +547,21 @@ export class HdcSession {
       await this.t.writeFrame({ sessionId: hs.sessionId, frame: next });
     }
     if (!this.authorized) { throw new Error('握手未完成'); }
+
+    // ★ 真机抓包实证：AUTH_OK 之后主机第一件事是**主动关闭通道 0**（握手通道），
+    // 帧为 flag=2、payload 0x00。我们之前没关，设备便自己关（payload 0x01），
+    // 之后所有命令通道都被立即关闭且无输出。
+    try {
+      await this.t.writeFrame({
+        sessionId: this.sessionId,
+        frame: buildCloseFrame({ channelId: 0, side: 'host' }),
+      });
+      this.t.emit('INFO', '已关闭握手通道(0)');
+      await sleep(60);
+    } catch (e) {
+      this.t.emit('INFO', `关闭握手通道失败: ${(e && e.message) || e}`);
+    }
+
     this.startHeartbeat();
     return hs.lastReply ? decodeText(hs.lastReply.buf) : '';
   }
