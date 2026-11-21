@@ -398,7 +398,7 @@ export class HdcSession {
   }
 
   /** 建立连接并完成 AUTH。返回 daemon 的 AUTH_OK 状态文本。 */
-  async connect({ resetFirst = true, resetSettleMs = 150 } = {}) {
+  async connect({ resetFirst = true, resetSettleMs = 150, confirmRounds = 7, confirmWaitMs = 9000 } = {}) {
     await this.t.open();
     // 先纯被动监听：真机上 hdc 打开设备后 47ms 内设备就自发心跳。
     // 若这里一个包都收不到，说明是设备侧不发数据，而不是我们的握手有问题。
@@ -406,19 +406,45 @@ export class HdcSession {
     const passive = await this.t.drainIdle({ timeoutMs: 3000, rounds: 4 });
     this.t.emit('INFO', `被动监听结束，收到 ${passive} 个包`);
 
-    try {
-      return await this.handshake({ resetFirst, resetSettleMs });
-    } catch (e) {
-      const msg = String(e && e.message ? e.message : e);
-      if (e && e.code === 'NEED_CONFIRM') { throw e; }   // 上机确认超时：重试无意义
-      if (!/等待应答|超时/.test(msg)) { throw e; }
-      // 变体：不发 RESET，直接再握一次手。
-      // 有些状态下 daemon 会因为刚被 RESET 而不再重建会话，直接握手反而能进
-      // "New session coming" 分支。两种都试，日志里能看清哪种有回音。
-      this.t.emit('INFO', '变体：本次不发 RESET，直接重新握手');
-      await this.t.drainIdle({ timeoutMs: 120, rounds: 10 });
-      return await this.handshake({ resetFirst: false, resetSettleMs: 0 });
+    let needConfirm = false;
+    for (let round = 1; round <= confirmRounds; round++) {
+      try {
+        return await this.handshake({ resetFirst: resetFirst || round > 1, resetSettleMs });
+      } catch (e) {
+        const code = e && e.code;
+        if (code === 'NEED_CONFIRM') {
+          needConfirm = true;
+          this.t.emit('INFO', `[第 ${round}/${confirmRounds} 轮] 设备未授权本机密钥 → `
+            + '★ 请在手机上点「允许 / 始终信任」，本机将在 ' + Math.round(confirmWaitMs / 1000)
+            + ' 秒后自动重新握手');
+          await sleep(confirmWaitMs);
+          continue;
+        }
+        // 首次超时：换"不发 RESET"的变体再试一次
+        const msg = String(e && e.message ? e.message : e);
+        if (round === 1 && /等待应答|超时/.test(msg)) {
+          this.t.emit('INFO', '变体：本次不发 RESET，直接重新握手');
+          await this.t.drainIdle({ timeoutMs: 120, rounds: 10 });
+          try {
+            return await this.handshake({ resetFirst: false, resetSettleMs: 0 });
+          } catch (e2) {
+            if (e2 && e2.code === 'NEED_CONFIRM') {
+              needConfirm = true;
+              this.t.emit('INFO', '★ 请在手机上点「允许 / 始终信任」');
+              await sleep(confirmWaitMs);
+              continue;
+            }
+            throw e2;
+          }
+        }
+        throw e;
+      }
     }
+    const err = new Error(needConfirm
+      ? '设备始终未授权本机密钥：手机上可能没有出现授权弹窗，或没有点「允许」'
+      : '握手未完成');
+    err.code = needConfirm ? 'NEED_CONFIRM' : 'HANDSHAKE';
+    throw err;
   }
 
   async handshake({ resetFirst = true, resetSettleMs = 150 } = {}) {
@@ -443,13 +469,12 @@ export class HdcSession {
     let resendDone = false;
     let lastFrame = frame;         // 最后发出的握手帧（确认期间用于催应答）
     let lastNudge = 0;
-    let confirmDeadline = 0;      // 设备要求"上机确认"后的等待截止时间（60 秒）
     const HARD_DEADLINE = Date.now() + 75000;
 
     for (let guard = 0; guard < 60; guard++) {
       if (Date.now() > HARD_DEADLINE) { throw new Error('握手总超时（120 秒）'); }
 
-      const timeoutMs = confirmDeadline ? 15000 : 8000;
+      const timeoutMs = 8000;
       const pkt = await this.t.readPacket({ timeoutMs });
 
       if (!pkt) {
@@ -496,14 +521,13 @@ export class HdcSession {
       if (bufText) { this.t.emit('INFO', `   buf 文本: ${JSON.stringify(bufText)}`); }
       this.t.emit('HEX', `reply-frame ${pkt.frame.length}B: ${hexOf(pkt.frame, 512)}`);
 
-      // ★ 关键分支：daemon 说"未授权，请在上机确认"。
-      // 这不是失败：用户点允许后它还会发 token。继续等，并把提示打到面板。
+      // ★ daemon 说"未授权，请在上机确认"。
+      // 实测：它回完这条消息就**关闭会话**（紧跟一个 flag=2 关闭帧，随后心跳恢复），
+      // 所以不能原地等 token —— 必须让用户去手机上点允许，然后**重新握手**。
       if (reply.authType === AUTH_OK && /UNAUTH|unauthorized|not set/i.test(bufText)) {
-        if (!confirmDeadline) {
-          confirmDeadline = Date.now() + 60000;
-          this.t.emit('INFO', '★ 请在手机上点「允许 / 始终信任」，然后保持此页面不要关闭（最多等 60 秒）');
-        }
-        continue;
+        const err = new Error('设备未授权本机密钥，需要在手机上确认');
+        err.code = 'NEED_CONFIRM';
+        throw err;
       }
 
       const next = await hs.accept(reply);
