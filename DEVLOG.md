@@ -265,3 +265,28 @@ console 每 20 次失败打一次 warn。避免再次静默失败。
 - 本地 agent 跑 `tools/hdc_probe8.py`（协议级重放，不经浏览器）
 ---
 
+
+## 2026-11-21 22:20 - 关键发现：设备对我们零发送（含自发心跳）
+
+**证据（用户粘贴的 r42 完整日志）：**
+```
+21:58:04.431 INFO serial="…" 版本=Ver: 3.2.0f73c487f8b34a2ba5
+21:58:05.261 RX timeout（本轮无数据）   ← 在任何 TX 之前
+21:58:05.261 TX ub-head opt=2 sid=0x0 len=0
+...
+全程只有 RX timeout，零个 RX pkt
+```
+真机抓包里 hdc 打开设备后 47ms 内设备就自发心跳 → **本机 daemon 一个字节都不发**，
+连它本该自发的心跳都没有。所以问题不在握手内容。
+
+**做了什么：**
+- 修 `tools/hdc_probe8.py` 的 `NameError: c_uint`（导入缺失，我的 bug）
+- `HdcTransport.readPacket()` 改为**始终复用同一个在途 transferIn**：
+  WebUSB 无超时，原先每次 race 超时就丢弃 promise，会在端点上堆积多个永远
+  不完成的传输
+- 连接开始时先**纯被动监听 3 秒**（不发任何字节），并记录收到几个包
+
+**待做什么：**
+- 让用户先跑 `hdc list targets -v` 证明 daemon 是否在发数据，再 `hdc kill` 后跑 probe8
+---
+

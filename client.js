@@ -6019,6 +6019,7 @@ class HdcTransport {
     // 诊断计数：hdc server 被杀时 IN 端点里会残留半帧，需要重同步
     this.resyncs = 0;
     this.dropped = 0;
+    this.pendingRead = null;   // 唯一的在途 IN 传输
   }
 
   static async requestDevice(usb, { vendorIds = [0x12d1] } = {}) {
@@ -6113,11 +6114,20 @@ class HdcTransport {
       const remain = deadline - Date.now();
       if (remain <= 0) { return null; }
 
+      // WebUSB 的 transferIn 没有超时参数，只能自己 race。
+      // 但**不能每次 race 超时就丢下 promise 再新起一个**，否则端点上会堆积
+      // 多个永远不会完成的传输。这里始终复用同一个在途传输。
+      if (!this.pendingRead) {
+        this.pendingRead = this.device.transferIn(this.iface.endpointIn, this.readChunk)
+          .then((r) => { this.pendingRead = null; return r; },
+                (e) => { this.pendingRead = null; throw e; });
+      }
       const res = await Promise.race([
-        this.device.transferIn(this.iface.endpointIn, this.readChunk),
+        this.pendingRead,
         sleep$1(remain).then(() => ({ status: 'timeout' })),
       ]);
 
+      if (!res) { this.emit('RX', 'timeout（本轮无数据）'); return null; }
       if (res.status === 'timeout') { this.emit('RX', 'timeout（本轮无数据）'); return null; }
       if (res.status !== 'ok') {
         if (res.status === 'stall') {
@@ -6247,8 +6257,11 @@ class HdcSession {
   /** 建立连接并完成 AUTH。返回 daemon 的 AUTH_OK 状态文本。 */
   async connect({ resetFirst = true, resetSettleMs = 150 } = {}) {
     await this.t.open();
-    // 上一次会话（如被 kill 的 hdc server）可能在 IN 端点留下半帧，先清干净
-    await this.t.drainIdle({ timeoutMs: 120, rounds: 20 });
+    // 先纯被动监听：真机上 hdc 打开设备后 47ms 内设备就自发心跳。
+    // 若这里一个包都收不到，说明是设备侧不发数据，而不是我们的握手有问题。
+    this.t.emit('INFO', '被动监听 3 秒（不发任何数据）');
+    const passive = await this.t.drainIdle({ timeoutMs: 3000, rounds: 4 });
+    this.t.emit('INFO', `被动监听结束，收到 ${passive} 个包`);
 
     try {
       return await this.handshake({ resetFirst, resetSettleMs });
@@ -6448,7 +6461,7 @@ function bytesToHexPreview(bytes, n = 24) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r42';
+const BUILD_TAG = 'r43';
 
 const inject = ['slots', 'locale'];
 
