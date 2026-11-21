@@ -421,11 +421,13 @@ export class HdcSession {
   /** 建立连接并完成 AUTH。返回 daemon 的 AUTH_OK 状态文本。 */
   async connect({ resetFirst = true, resetSettleMs = 150, confirmRounds = 7, confirmWaitMs = 9000 } = {}) {
     await this.t.open();
+    this.ensureAlive();
     // 先纯被动监听：真机上 hdc 打开设备后 47ms 内设备就自发心跳。
     // 若这里一个包都收不到，说明是设备侧不发数据，而不是我们的握手有问题。
     this.t.emit('INFO', '被动监听 3 秒（不发任何数据）');
     const passive = await this.t.drainIdle({ timeoutMs: 3000, rounds: 4 });
     this.t.emit('INFO', `被动监听结束，收到 ${passive} 个包`);
+    this.ensureAlive();
 
     let needConfirm = false;
     for (let round = 1; round <= confirmRounds; round++) {

@@ -6446,11 +6446,13 @@ class HdcSession {
   /** 建立连接并完成 AUTH。返回 daemon 的 AUTH_OK 状态文本。 */
   async connect({ resetFirst = true, resetSettleMs = 150, confirmRounds = 7, confirmWaitMs = 9000 } = {}) {
     await this.t.open();
+    this.ensureAlive();
     // 先纯被动监听：真机上 hdc 打开设备后 47ms 内设备就自发心跳。
     // 若这里一个包都收不到，说明是设备侧不发数据，而不是我们的握手有问题。
     this.t.emit('INFO', '被动监听 3 秒（不发任何数据）');
     const passive = await this.t.drainIdle({ timeoutMs: 3000, rounds: 4 });
     this.t.emit('INFO', `被动监听结束，收到 ${passive} 个包`);
+    this.ensureAlive();
 
     let needConfirm = false;
     for (let round = 1; round <= confirmRounds; round++) {
@@ -6788,7 +6790,7 @@ function hexOf(bytes, limit = 256) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r62';
+const BUILD_TAG = 'r63';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -6843,8 +6845,24 @@ const STATE = {
   notify: null,       // 面板注册的实时刷新回调
   hdcKeyText: '',     // 保留字段（已不再暴露 UI）
   connectToken: 0,    // 每次连接自增；旧任务发现令牌变化即放弃
+  connectInFlight: null,  // 串行化：同一时刻只允许一个连接流程
   connection: null,   // 宿主 RPC 连接（用于把 HDC 日志送到宿主落盘）
 };
+
+/**
+ * 串行化连接：同一时刻只允许一个连接流程在跑。
+ * 并发连接会让两个握手在同一设备上互相 RESET，双方都收不到应答。
+ */
+async function withConnectLock(fn) {
+  if (STATE.connectInFlight) {
+    try { await STATE.connectInFlight; } catch { /* 前一个失败无所谓 */ }
+  }
+  const run = (async () => fn())();
+  STATE.connectInFlight = run.finally(() => {
+    if (STATE.connectInFlight === run) { STATE.connectInFlight = null; }
+  });
+  return run;
+}
 
 /** 把 HDC 日志送到宿主写文件，便于直接读取而不必截屏。 */
 async function flushHdcLog() {
@@ -7282,8 +7300,10 @@ function MobileBridgeSection(props) {
           const dev = granted.find((d) => d.vendorId === 0x12d1);
           if (dev && !STATE.hdc && !STATE.adb) {
             pushHdcLog('INFO', '检测到已授权的鸿蒙设备，尝试自动重连');
-            const token = ++STATE.connectToken;
-            const next = await connectHarmony(dev, token);
+            const next = await withConnectLock(async () => {
+              const token = ++STATE.connectToken;
+              return connectHarmony(dev, token);
+            });
             if (STATE.connectToken !== token) { await detach(); return; }
             if (alive) { setInfo(next); setKind('hdc'); setCmd('param get const.product.model'); setPhase('connected'); return; }
           }
@@ -7298,6 +7318,10 @@ function MobileBridgeSection(props) {
   }, []);
 
   async function connect() {
+    return withConnectLock(runConnect);
+  }
+
+  async function runConnect() {
     setError('');
     setPhase('connecting');
     // 作废上一次会话：避免它的重试循环继续往端点写旧 sid 的帧
