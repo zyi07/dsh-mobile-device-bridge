@@ -145,3 +145,20 @@ console 每 20 次失败打一次 warn。避免再次静默失败。
 - 等用户在真机点「诊断」，据 `claimTest` 结果决定：关占用进程 / Zadig 绑 WinUSB / 修代码
 ---
 
+
+## 2026-11-21 12:40 - HDC claim 加固：退避重试 + 枚举变化后换新鲜句柄
+
+**做了什么：**
+- 现象：手机清除授信→重新插→点连接→手机弹「始终信任」→点信任后报
+  `Unable to claim interface`
+- 推断：授权瞬间手机会重新枚举 USB，claim 撞在枚举空窗期；且旧 `USBDevice`
+  句柄在重新枚举后失效
+- `HdcTransport.open()` 改为**退避重试 4 次**（每次失败先 `close()` 再等 400ms×n）
+- `connectHarmony()` 在 claim/NetworkError 类错误上**用 `getDevices()` 取新鲜句柄重试一次**
+- 提交 hash: 待填
+
+**待做什么：**
+- 仍需用户点「诊断」提供 `claimTest` / `claimed` 实测结果
+- 若 claim 恒失败且 `claimed=false`：查 Windows 服务（Huawei PC Manager 之类）与 WinUSB 绑定
+---
+

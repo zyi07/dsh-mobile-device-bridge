@@ -123,34 +123,43 @@ export class HdcTransport {
     return device;
   }
 
-  async open() {
+  /**
+   * 打开并 claim。带重试：手机在"始终信任"授权瞬间会重新枚举 USB，
+   * 第一次 claim 常常正好撞在枚举空窗期，所以失败要退避重试几次。
+   */
+  async open({ attempts = 4, delayMs = 400 } = {}) {
     const d = this.device;
-    if (!d.opened) { await d.open(); }
-    if (d.configuration === null || d.configuration === undefined) {
-      const cfg = d.configurations && d.configurations[0];
-      if (!cfg) { throw new Error('设备没有配置'); }
-      await d.selectConfiguration(cfg.configurationValue);
+    let lastErr = null;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        if (!d.opened) { await d.open(); }
+        if (!d.configuration) {
+          const cfg = d.configurations && d.configurations[0];
+          if (!cfg) { throw new Error('设备没有配置'); }
+          await d.selectConfiguration(cfg.configurationValue);
+        }
+        this.iface = findHdcInterface(d);
+        await d.claimInterface(this.iface.interfaceNumber);
+        this.opened = true;
+        return this.iface;
+      } catch (e) {
+        lastErr = e;
+        this.opened = false;
+        // 释放句柄，否则下一次一定失败（WebUSB 的 open 会独占设备）
+        try { await d.close(); } catch { /* ignore */ }
+        if (attempt < attempts) { await sleep(delayMs * attempt); }
+      }
     }
-    this.iface = findHdcInterface(d);
-    try {
-      await d.claimInterface(this.iface.interfaceNumber);
-    } catch (e) {
-      // 保留原始信息：WebUSB 抛的是 DOMException，name/message 才是诊断依据
-      const desc =
-        `claimInterface(${this.iface.interfaceNumber}) 失败`
-        + ` [class=0x${IFACE_CLASS.toString(16)} sub=0x${IFACE_SUBCLASS.toString(16)}`
-        + ` proto=0x${IFACE_PROTOCOL.toString(16)} in=0x${this.iface.endpointIn.toString(16)}`
-        + ` out=0x${this.iface.endpointOut.toString(16)}]`;
-      // 关键：失败也要把设备句柄关掉。WebUSB 里 open() 会占住设备，
-      // 泄漏的句柄会让后续每次 claimInterface 都报 "Unable to claim interface"。
-      try { await d.close(); } catch { /* ignore */ }
-      const err = new Error(`${desc} → ${e && e.name ? e.name : 'Error'}: ${e && e.message ? e.message : e}`);
-      err.cause = e;
-      err.diagnostic = await diagnoseUsb().catch(() => null);
-      throw err;
-    }
-    this.opened = true;
-    return this.iface;
+    const desc =
+      `claim 失败（重试 ${attempts} 次）`
+      + ` [class=0x${IFACE_CLASS.toString(16)} sub=0x${IFACE_SUBCLASS.toString(16)}`
+      + ` proto=0x${IFACE_PROTOCOL.toString(16)}]`;
+    const err = new Error(
+      `${desc} → ${(lastErr && lastErr.name) || 'Error'}: ${(lastErr && lastErr.message) || lastErr}`,
+    );
+    err.cause = lastErr;
+    err.diagnostic = await diagnoseUsb().catch(() => null);
+    throw err;
   }
 
   /**

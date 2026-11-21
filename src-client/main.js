@@ -105,13 +105,28 @@ async function detach() {
  *   · 连上后先跑一条 param get 拿型号，作为面板展示信息
  */
 async function connectHarmony(device) {
-  const t = new HdcTransport(device);
+  const attempt = async (dev) => {
+    const t = new HdcTransport(dev);
+    try {
+      return await connectHarmonyInner(t, dev);
+    } catch (e) {
+      // 失败必须释放：否则设备句柄留在 open 状态，之后每次 claim 都会失败
+      try { await t.close(); } catch { /* ignore */ }
+      throw e;
+    }
+  };
+
   try {
-    return await connectHarmonyInner(t, device);
+    return await attempt(device);
   } catch (e) {
-    // 失败必须释放：否则设备句柄留在 open 状态，之后每次 claim 都会失败
-    try { await t.close(); } catch { /* ignore */ }
-    throw e;
+    const raw = String(e && e.message ? e.message : e);
+    // 只在"接口/枚举"类错误上重试一次：手机授权后可能重新枚举，旧句柄已失效
+    if (!/claim|Unable|NetworkError|disconnect|in use|busy/i.test(raw)) { throw e; }
+    await new Promise((r) => setTimeout(r, 700));
+    const list = await navigator.usb.getDevices().catch(() => []);
+    const fresh = list.find((d) => d.vendorId === 0x12d1);
+    if (!fresh) { throw e; }
+    return await attempt(fresh);
   }
 }
 
