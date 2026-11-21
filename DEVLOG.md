@@ -321,3 +321,36 @@ SET_CONFIGURATION 会重置所有接口/端点，正好能解释 daemon 侧 `Sen
 - 真机验证：F5 → hdc kill → 连接；看是否收到心跳与 authType=3
 ---
 
+
+## 2026-11-21 22:35 - SET_CONFIGURATION 假设被证实：daemon 开始回话
+
+**真机日志（r44）：**
+```
+INFO claim 成功（未调用 selectConfiguration）iface=0
+INFO 被动监听 3 秒（不发任何数据）
+RX timeout → INFO 被动监听结束，收到 0 个包
+TX reset(无帧)
+TX ub-head sid=0x99D75AA8 len=180 → TX frame 180B
+RX pkt opt=1 sid=0x99D75AA8 len=99     ← ★ daemon 回了 AUTH_PUBLICKEY 请求
+TX ub-head len=710 → TX frame 710B     ← 我们发了公钥
+RX pkt opt=1 sid=0x99D75AA8 len=451    ← 设备回了 451B（抓包里 token 应答只有 86B）
+```
+
+**结论：** 不再调用 `SET_CONFIGURATION` 后，daemon 立刻正常应答 → 之前"设备零发送"
+的根因就是 `selectConfiguration` 重置了接口/端点，使 daemon 的回包发送失败
+（对应历史日志 `SendUSBRaw index failed`）。
+
+**新问题：** 公钥发出后 daemon 回复 451 字节，与抓包中 86 字节的 token 应答不符，
+需要看清内容才能判断是"拒绝并说明原因"还是别的。
+
+**做了什么：**
+- 握手应答改为**结构化日志**：authType（含名称）、sid、connectKey 长度、buf 长度、
+  buf 文本（前 160 字符）、以及前 512 字节完整 hex
+- `session.js` 的异常信息带上 buf 文本，AUTH_FAIL 与意外 authType 都能直接看到原因
+- 构建标记 r45
+
+**待做什么：**
+- 根据 451B 应答内容决定：若是"拒绝"→ 走上机授权/复用 hdc 密钥；
+  若是分片或其他 → 修读取与状态机
+---
+

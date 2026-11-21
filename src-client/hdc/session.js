@@ -251,12 +251,23 @@ export class Handshake {
         });
       }
       if (authType === AUTH_OK) { this.state = STATES.AUTHORIZED; return null; }   // 设备已授权过
-      if (authType === AUTH_FAIL) { this.state = STATES.FAILED; throw new Error('daemon 拒绝握手'); }
-      throw new Error(`意外的 authType=${authType}（期望 3）`);
+      const bufText = reply.buf
+        ? [...reply.buf].map((c) => (c >= 32 && c < 127 ? String.fromCharCode(c) : '.')).join('')
+        : '';
+      if (authType === AUTH_FAIL) {
+        this.state = STATES.FAILED;
+        throw new Error(`daemon 拒绝了握手（AUTH_FAIL）${bufText ? '：' + bufText : ''}`);
+      }
+      throw new Error(`意外的 authType=${authType}（期望 3）${bufText ? ' buf=' + bufText.slice(0, 200) : ''}`);
     }
 
     if (this.state === STATES.AWAIT_TOKEN) {
-      if (authType !== AUTH_SIGNATURE) { throw new Error(`意外的 authType=${authType}（期望 2）`); }
+      if (authType !== AUTH_SIGNATURE) {
+        const t2 = reply.buf
+          ? [...reply.buf].map((c) => (c >= 32 && c < 127 ? String.fromCharCode(c) : '.')).join('')
+          : '';
+        throw new Error(`意外的 authType=${authType}（期望 2）${t2 ? ' buf=' + t2.slice(0, 300) : ''}`);
+      }
       const buf = reply.buf || new Uint8Array(0);
       if (buf.length !== 20) { throw new Error(`token 长度应为 20，实际 ${buf.length}`); }
       this.token = buf;

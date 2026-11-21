@@ -5819,12 +5819,23 @@ class Handshake {
         });
       }
       if (authType === AUTH_OK) { this.state = STATES.AUTHORIZED; return null; }   // 设备已授权过
-      if (authType === AUTH_FAIL) { this.state = STATES.FAILED; throw new Error('daemon 拒绝握手'); }
-      throw new Error(`意外的 authType=${authType}（期望 3）`);
+      const bufText = reply.buf
+        ? [...reply.buf].map((c) => (c >= 32 && c < 127 ? String.fromCharCode(c) : '.')).join('')
+        : '';
+      if (authType === AUTH_FAIL) {
+        this.state = STATES.FAILED;
+        throw new Error(`daemon 拒绝了握手（AUTH_FAIL）${bufText ? '：' + bufText : ''}`);
+      }
+      throw new Error(`意外的 authType=${authType}（期望 3）${bufText ? ' buf=' + bufText.slice(0, 200) : ''}`);
     }
 
     if (this.state === STATES.AWAIT_TOKEN) {
-      if (authType !== AUTH_SIGNATURE) { throw new Error(`意外的 authType=${authType}（期望 2）`); }
+      if (authType !== AUTH_SIGNATURE) {
+        const t2 = reply.buf
+          ? [...reply.buf].map((c) => (c >= 32 && c < 127 ? String.fromCharCode(c) : '.')).join('')
+          : '';
+        throw new Error(`意外的 authType=${authType}（期望 2）${t2 ? ' buf=' + t2.slice(0, 300) : ''}`);
+      }
       const buf = reply.buf || new Uint8Array(0);
       if (buf.length !== 20) { throw new Error(`token 长度应为 20，实际 ${buf.length}`); }
       this.token = buf;
@@ -6351,6 +6362,14 @@ class HdcSession {
       let reply;
       try { reply = tryParseHandshakeFrame(pkt.frame); } catch { continue; }
       if (!reply) { continue; }        // 心跳等非握手帧，跳过继续等
+      const AUTH_NAMES = { 0: 'NONE', 1: 'TOKEN', 2: 'SIGNATURE', 3: 'PUBLICKEY', 4: 'OK', 5: 'FAIL' };
+      const bufText = [...reply.buf].filter((c) => c >= 32 && c < 127).length >= 4
+        ? new TextDecoder().decode(reply.buf.slice(0, 160))
+        : '';
+      this.t.emit('INFO', `← 握手应答 authType=${reply.authType}(${AUTH_NAMES[reply.authType] || '?'}) `
+        + `sid=${reply.sessionId} connectKey=${reply.connectKey.length}B buf=${reply.buf.length}B`);
+      if (bufText) { this.t.emit('INFO', `   buf 文本: ${JSON.stringify(bufText)}`); }
+      this.t.emit('HEX', `reply-frame ${pkt.frame.length}B: ${hexOf(pkt.frame, 512)}`);
       const next = await hs.accept(reply);
       this.info = reply;
       if (next === null) {
@@ -6503,8 +6522,15 @@ function bytesToHexPreview(bytes, n = 24) {
   return hex + (bytes.length > n ? ' ...' : '');
 }
 
+
+function hexOf(bytes, limit = 256) {
+  const n = Math.min(limit, bytes.length);
+  return [...bytes.subarray(0, n)].map((b) => b.toString(16).padStart(2, '0')).join(' ')
+    + (bytes.length > n ? ` ...(+${bytes.length - n}B)` : '');
+}
+
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r44';
+const BUILD_TAG = 'r45';
 
 const inject = ['slots', 'locale'];
 

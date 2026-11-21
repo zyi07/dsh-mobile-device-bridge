@@ -451,6 +451,14 @@ export class HdcSession {
       let reply;
       try { reply = tryParseHandshakeFrame(pkt.frame); } catch { continue; }
       if (!reply) { continue; }        // 心跳等非握手帧，跳过继续等
+      const AUTH_NAMES = { 0: 'NONE', 1: 'TOKEN', 2: 'SIGNATURE', 3: 'PUBLICKEY', 4: 'OK', 5: 'FAIL' };
+      const bufText = [...reply.buf].filter((c) => c >= 32 && c < 127).length >= 4
+        ? new TextDecoder().decode(reply.buf.slice(0, 160))
+        : '';
+      this.t.emit('INFO', `← 握手应答 authType=${reply.authType}(${AUTH_NAMES[reply.authType] || '?'}) `
+        + `sid=${reply.sessionId} connectKey=${reply.connectKey.length}B buf=${reply.buf.length}B`);
+      if (bufText) { this.t.emit('INFO', `   buf 文本: ${JSON.stringify(bufText)}`); }
+      this.t.emit('HEX', `reply-frame ${pkt.frame.length}B: ${hexOf(pkt.frame, 512)}`);
       const next = await hs.accept(reply);
       this.info = reply;
       if (next === null) {
@@ -601,4 +609,11 @@ function bytesToHexPreview(bytes, n = 24) {
   const arr = bytes.subarray(0, Math.min(n, bytes.length));
   const hex = [...arr].map((b) => b.toString(16).padStart(2, '0')).join(' ');
   return hex + (bytes.length > n ? ' ...' : '');
+}
+
+
+function hexOf(bytes, limit = 256) {
+  const n = Math.min(limit, bytes.length);
+  return [...bytes.subarray(0, n)].map((b) => b.toString(16).padStart(2, '0')).join(' ')
+    + (bytes.length > n ? ` ...(+${bytes.length - n}B)` : '');
 }
