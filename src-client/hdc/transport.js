@@ -130,34 +130,48 @@ export class HdcTransport {
   async open({ attempts = 4, delayMs = 400 } = {}) {
     const d = this.device;
     let lastErr = null;
+    let lastStep = 'open';
     for (let attempt = 1; attempt <= attempts; attempt++) {
+      let step = 'open';
       try {
-        if (!d.opened) { await d.open(); }
+        if (!d.opened) { step = 'open'; await d.open(); }
+        step = 'selectConfiguration';
         if (!d.configuration) {
           const cfg = d.configurations && d.configurations[0];
           if (!cfg) { throw new Error('设备没有配置'); }
           await d.selectConfiguration(cfg.configurationValue);
         }
+        step = 'claim';
         this.iface = findHdcInterface(d);
         await d.claimInterface(this.iface.interfaceNumber);
         this.opened = true;
         return this.iface;
       } catch (e) {
         lastErr = e;
+        lastStep = step;
         this.opened = false;
         // 释放句柄，否则下一次一定失败（WebUSB 的 open 会独占设备）
         try { await d.close(); } catch { /* ignore */ }
         if (attempt < attempts) { await sleep(delayMs * attempt); }
       }
     }
+    // 第 7 轮实测：hdc server 常驻时 libusb_open 返回 -3 ACCESS，
+    // Chrome 表现为 open 这一步就失败。open 失败 = 被别的程序独占，
+    // 而不是"驱动不对"（真机 interface 0 的 Service 已确认是 WINUSB）。
+    const where = lastStep === 'open'
+      ? 'open 失败（设备被独占）'
+      : (lastStep === 'claim'
+        ? `claimInterface 失败（重试 ${attempts} 次）`
+        : `${lastStep} 失败`);
     const desc =
-      `claim 失败（重试 ${attempts} 次）`
+      where
       + ` [class=0x${IFACE_CLASS.toString(16)} sub=0x${IFACE_SUBCLASS.toString(16)}`
       + ` proto=0x${IFACE_PROTOCOL.toString(16)}]`;
     const err = new Error(
       `${desc} → ${(lastErr && lastErr.name) || 'Error'}: ${(lastErr && lastErr.message) || lastErr}`,
     );
     err.cause = lastErr;
+    err.step = lastStep;
     err.diagnostic = await diagnoseUsb().catch(() => null);
     throw err;
   }

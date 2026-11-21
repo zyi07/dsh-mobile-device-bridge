@@ -452,3 +452,49 @@ import 的 24 个 libusb 函数、替换 `bulk_transfer`/`submit_transfer` 等 4
 2. **HDC 截图**：需 `snapshot_display` + 文件传输（`file recv`），未实现
 3. **假设待验**：daemon 是否只校验"当场送的公钥 vs 当场送的签名"。
    若它还要求公钥在已授权列表里，则需复用 hdc 的私钥（导入 PKCS#8）
+
+## 第 7 轮：WebUSB 连不上的根因（实测，2026-11-21）
+
+### 现象
+
+Chrome 能枚举设备、能选中、能在授权后报错：
+
+```
+NetworkError: Failed to execute 'claimInterface' on 'USBDevice': Unable to claim interface.
+```
+
+### 三条实测证据
+
+| 检查 | 结果 | 出处 |
+|---|---|---|
+| interface 0（`HDC Interface`）的驱动 | `Service = WINUSB`，`winusb.inf`，`USB\MS_COMP_WINUSB` | `driver_info.txt` |
+| hdc server 在跑时 `libusb_open` | **-3 ACCESS**（连 open 都失败，走不到 claim） | `e1_claim.txt` |
+| `hdc kill` 之后 | open **0 SUCCESS**、`claim(0)` **0 SUCCESS** | `c1_claim_after_hdc_kill.txt` |
+
+对照组 `claim(1) = -12 NOT_SUPPORTED` 是正常的：MI_01 是 MTP（`WUDFWpdMtp`），不是 WinUSB。
+
+### 结论
+
+**根因是 `hdc server`（`hdc.exe`）常驻并独占打开 WinUSB 设备。**
+Chrome 权限与驱动都没问题（设备甚至是 `MS_COMP_WINUSB`，WebUSB 的理想形态），
+是 `open()` 拿不到独占句柄，Chrome 把它报成 `Unable to claim interface`。
+
+**不是**驱动类型问题（排除 libusbK/usbdk 假设）、**不是**权限问题。
+
+### 正确操作顺序
+
+```
+1) & "C:\Program Files\Huawei\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe" kill
+2) 关闭 DevEco Studio（开着会自动拉起 hdc）
+3) 之后不要再运行任何 hdc 命令
+4) 立刻在浏览器里点「连接设备」
+```
+
+⚠️ 任何一条 hdc 命令（含 `hdc list targets`）都会让 server 重新抢占设备。
+
+### 插件侧已做的适配
+
+- `HdcTransport.open()` 记录失败发生在 `open` / `selectConfiguration` / `claim` 哪一步
+- **`open` 阶段失败** → 判定为「被独占」，给出上述可复制的命令，
+  而不是误导性的"去装 Android USB Driver"
+- 退避重试 4 次 + 换新鲜句柄重试一次（应对授权瞬间的重新枚举）

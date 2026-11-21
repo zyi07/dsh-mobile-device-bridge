@@ -6030,34 +6030,48 @@ class HdcTransport {
   async open({ attempts = 4, delayMs = 400 } = {}) {
     const d = this.device;
     let lastErr = null;
+    let lastStep = 'open';
     for (let attempt = 1; attempt <= attempts; attempt++) {
+      let step = 'open';
       try {
-        if (!d.opened) { await d.open(); }
+        if (!d.opened) { step = 'open'; await d.open(); }
+        step = 'selectConfiguration';
         if (!d.configuration) {
           const cfg = d.configurations && d.configurations[0];
           if (!cfg) { throw new Error('设备没有配置'); }
           await d.selectConfiguration(cfg.configurationValue);
         }
+        step = 'claim';
         this.iface = findHdcInterface(d);
         await d.claimInterface(this.iface.interfaceNumber);
         this.opened = true;
         return this.iface;
       } catch (e) {
         lastErr = e;
+        lastStep = step;
         this.opened = false;
         // 释放句柄，否则下一次一定失败（WebUSB 的 open 会独占设备）
         try { await d.close(); } catch { /* ignore */ }
         if (attempt < attempts) { await sleep$1(delayMs * attempt); }
       }
     }
+    // 第 7 轮实测：hdc server 常驻时 libusb_open 返回 -3 ACCESS，
+    // Chrome 表现为 open 这一步就失败。open 失败 = 被别的程序独占，
+    // 而不是"驱动不对"（真机 interface 0 的 Service 已确认是 WINUSB）。
+    const where = lastStep === 'open'
+      ? 'open 失败（设备被独占）'
+      : (lastStep === 'claim'
+        ? `claimInterface 失败（重试 ${attempts} 次）`
+        : `${lastStep} 失败`);
     const desc =
-      `claim 失败（重试 ${attempts} 次）`
+      where
       + ` [class=0x${IFACE_CLASS.toString(16)} sub=0x${IFACE_SUBCLASS.toString(16)}`
       + ` proto=0x${IFACE_PROTOCOL.toString(16)}]`;
     const err = new Error(
       `${desc} → ${(lastErr && lastErr.name) || 'Error'}: ${(lastErr && lastErr.message) || lastErr}`,
     );
     err.cause = lastErr;
+    err.step = lastStep;
     err.diagnostic = await diagnoseUsb().catch(() => null);
     throw err;
   }
@@ -6338,6 +6352,9 @@ const h = React.createElement;
  * 认不出来的原样返回，便于贴到 Console 里排查。
  */
 function friendly(raw, t, kind = 'adb') {
+  // 第 7 轮实测结论：hdc server 常驻时，连 open 都拿不到句柄。
+  // open 失败 = 设备被别的程序独占，与驱动无关（interface 0 已确认是 WINUSB）。
+  if (/open 失败（设备被独占）/.test(raw)) return t('errExclusive');
   if (/already in use[d]? by another program|device in use|resource busy/i.test(raw)) return t('errBusy');
   // 浏览器接管接口失败：Android 侧通常是驱动问题；HarmonyOS 侧几乎总是 hdc server 占着
   if (/claim interface|failed to claim|unable to claim|access denied|not allowed|security/i.test(raw)) {
@@ -6905,6 +6922,7 @@ function apply(ctx) {
       reconnectingHint: '检测到之前授权过的设备，正在用已保存的 RSA 密钥自动重连，不需要再点按钮。',
       noWebusb: '当前浏览器不支持 WebUSB。请使用 Chrome 或 Edge 打开本页面。',
       errBusy: '手机已被另一个程序占用（这一步是浏览器拿到了 USB 设备，但接口被抢占）。\n请在你自己电脑上依次做：\n1) 关掉 adb 服务：adb kill-server（Windows 任务管理器里结束 adb.exe）\n2) 退出 Android Studio、scrcpy、华为 HiSuite、各类手机助手\n3) 拔掉数据线再插回去，保持屏幕解锁\n4) 回到这里重新点「连接设备」',
+      errExclusive: '这台电脑上的 hdc server 正独占着设备，Chrome 连 open 都做不到（真机实测：hdc server 在跑时 libusb_open 返回 -3 ACCESS，接口本身是正常的 WINUSB）。\n\n请按顺序做：\n1) 在 Windows 上执行（绝对路径）：\n   & "C:\\Program Files\\Huawei\\DevEco Studio\\sdk\\default\\openharmony\\toolchains\\hdc.exe" kill\n2) 关闭 DevEco Studio（它开着会自动把 hdc 拉起来）\n3) 执行完之后【不要再运行任何 hdc 命令】，立刻回来点「连接设备」\n\n注意：任何一条 hdc 命令（包括 hdc list targets）都会让 server 重新抢占设备。',
       errHdcBusy: '浏览器无法接管 HDC 接口——几乎总是因为这台电脑上的 hdc server 正占着它（DevEco Studio 会自动拉起 hdc）。\n请在该电脑上依次做：\n1) 执行 hdc kill（或在任务管理器里结束 hdc.exe）\n2) 关闭 DevEco Studio / 手机助手 / HiSuite\n3) 拔掉数据线再插回去，保持屏幕解锁\n4) 回到这里重新点「连接设备」\n若 hdc kill 后仍失败，才是驱动问题（该 HDC 接口未绑定 WinUSB）。',
       errDriver: '浏览器无法接管该 USB 接口，通常是手机在 Windows 上绑的是 MTP/厂商驱动而不是 WinUSB。\n请在电脑上安装 Google Android USB Driver，或在设备管理器里把该设备的驱动改为 WinUSB，然后重新插拔。',
       errGesture: '浏览器要求由点击触发设备选择，请直接点「连接设备」按钮，不要通过脚本调用。',
@@ -6936,6 +6954,7 @@ function apply(ctx) {
       reconnectingHint: 'A previously authorized device was found; reconnecting with the stored RSA key, no click needed.',
       noWebusb: 'This browser has no WebUSB support. Open this page in Chrome or Edge.',
       errBusy: 'The phone is held by another program: the browser reached the USB device but could not claim the interface.\nOn your own computer:\n1) stop the adb server: adb kill-server (or end adb.exe in Task Manager)\n2) quit Android Studio, scrcpy, HiSuite and phone-assistant tools\n3) unplug and replug the cable, keep the screen unlocked\n4) click "Connect device" again',
+      errExclusive: 'The hdc server on this computer holds the device exclusively, so Chrome cannot even open it. (Measured on the real device: with the hdc server running, libusb_open returns -3 ACCESS, while the interface itself is a healthy WINUSB node.)\n\nDo this in order:\n1) On Windows run:\n   & "C:\\Program Files\\Huawei\\DevEco Studio\\sdk\\default\\openharmony\\toolchains\\hdc.exe" kill\n2) Quit DevEco Studio (it restarts hdc automatically)\n3) After that do NOT run any hdc command; click "Connect device" right away\n\nAny hdc command (even hdc list targets) lets the server grab the device again.',
       errHdcBusy: 'The browser cannot claim the HDC interface. This is almost always because the hdc server on this computer is holding it (DevEco Studio starts hdc automatically).\nOn that computer:\n1) run hdc kill (or end hdc.exe in Task Manager)\n2) quit DevEco Studio / HiSuite / phone-assistant tools\n3) unplug and replug the cable, keep the screen unlocked\n4) click "Connect device" again\nIf it still fails after hdc kill, then it is a driver problem (HDC interface not bound to WinUSB).',
       errDriver: 'The browser cannot take over this USB interface. On Windows the phone is usually bound to the MTP/vendor driver instead of WinUSB.\nInstall the Google Android USB Driver, or switch the device driver to WinUSB in Device Manager, then replug.',
       errGesture: 'The browser requires a click to open the device chooser. Press the "Connect device" button directly.',

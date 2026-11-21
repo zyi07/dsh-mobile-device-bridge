@@ -162,3 +162,21 @@ console 每 20 次失败打一次 warn。避免再次静默失败。
 - 若 claim 恒失败且 `claimed=false`：查 Windows 服务（Huawei PC Manager 之类）与 WinUSB 绑定
 ---
 
+
+## 2026-11-21 13:50 - 定位 WebUSB 连不上根因：hdc server 独占 WinUSB
+
+**做了什么：**
+- 第 7 轮实测证据（本地 agent 提供）：
+  · interface 0 的 `Service = WINUSB`、`winusb.inf`、`MS_COMP_WINUSB`
+  · hdc server 在跑时 `libusb_open` → -3 ACCESS（open 阶段就失败）
+  · `hdc kill` 后 open/claim(0) 均 0 SUCCESS
+- 结论写进 `docs/HDC_PROTOCOL.md`：根因是 hdc server 独占，非驱动/权限问题
+- `HdcTransport.open()` 区分 open / selectConfiguration / claim 三个阶段
+- `main.js` 新增 `errExclusive` 文案：直接给出可复制的 `hdc kill` 绝对路径命令，
+  并强调"之后不要再运行任何 hdc 命令"
+
+**待做什么：**
+- 用户按顺序执行后做真机 AUTH 验证（首次连接需现场生成 RSA-3072 密钥）
+- HDC 截图（snapshot_display + file recv）仍未实现
+---
+
