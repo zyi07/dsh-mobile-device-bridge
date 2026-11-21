@@ -6448,7 +6448,7 @@ function bytesToHexPreview(bytes, n = 24) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r41';
+const BUILD_TAG = 'r42';
 
 const inject = ['slots', 'locale'];
 
@@ -6576,9 +6576,8 @@ async function detach() {
 async function connectHarmony(device) {
   const attempt = async (dev) => {
     STATE.log = [];
-    pushHdcLog('INFO', `=== 尝试连接开始 build=${BUILD_TAG} ===`);
+    pushHdcLog('INFO', `=== 尝试连接开始 build=${BUILD_TAG} serial=${JSON.stringify(dev.serialNumber || '')} ===`);
     await flushHdcLog();          // 先落一条，确保宿主侧能看到"这次确实跑了"
-    STATE.log = [];               // 清掉，避免重复
     const t = new HdcTransport(dev, { logger: pushHdcLog });
     try {
       return await connectHarmonyInner(t, dev);
@@ -6863,13 +6862,20 @@ function MobileBridgeSection(props) {
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
       const hint = friendly(raw, t, kind);
-      // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
-      setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
-      // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
-      if (STATE.log && STATE.log.length) {
-        setOut(STATE.log.join('\n'));
-        await flushHdcLog();
+      // 日志与原始错误在下面统一设置（并把日志复制到剪贴板）
+      const logText = (STATE.log && STATE.log.length)
+        ? STATE.log.join('\n')
+        : '（本次未产生收发日志：说明失败发生在创建传输层之前）';
+      setOut(logText);
+      try {
+        // 方便用户直接粘贴给开发者：失败即把完整日志放进剪贴板
+        await navigator.clipboard.writeText(logText);
+        setError((hint ? (hint + '\n\n') : '') + '原始错误：' + raw
+          + '\n\n完整收发日志已复制到剪贴板，直接 Ctrl+V 粘贴即可。');
+      } catch {
+        setError((hint ? (hint + '\n\n') : '') + '原始错误：' + raw);
       }
+      await flushHdcLog();
       setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle');
     }
   }
@@ -6890,13 +6896,20 @@ function MobileBridgeSection(props) {
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
       const hint = friendly(raw, t, kind);
-      // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
-      setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
-      // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
-      if (STATE.log && STATE.log.length) {
-        setOut(STATE.log.join('\n'));
-        await flushHdcLog();
+      // 日志与原始错误在下面统一设置（并把日志复制到剪贴板）
+      const logText = (STATE.log && STATE.log.length)
+        ? STATE.log.join('\n')
+        : '（本次未产生收发日志：说明失败发生在创建传输层之前）';
+      setOut(logText);
+      try {
+        // 方便用户直接粘贴给开发者：失败即把完整日志放进剪贴板
+        await navigator.clipboard.writeText(logText);
+        setError((hint ? (hint + '\n\n') : '') + '原始错误：' + raw
+          + '\n\n完整收发日志已复制到剪贴板，直接 Ctrl+V 粘贴即可。');
+      } catch {
+        setError((hint ? (hint + '\n\n') : '') + '原始错误：' + raw);
       }
+      await flushHdcLog();
     } finally {
       setBusy(false);
     }
@@ -6918,13 +6931,20 @@ function MobileBridgeSection(props) {
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
       const hint = friendly(raw, t, kind);
-      // 始终保留原始错误：友好文案可能判断错方向，原始信息才是证据
-      setError(hint ? (hint + '\n\n原始错误：' + raw) : raw);
-      // HDC 收发日志一并显示，便于定位"发了但没回"这类问题
-      if (STATE.log && STATE.log.length) {
-        setOut(STATE.log.join('\n'));
-        await flushHdcLog();
+      // 日志与原始错误在下面统一设置（并把日志复制到剪贴板）
+      const logText = (STATE.log && STATE.log.length)
+        ? STATE.log.join('\n')
+        : '（本次未产生收发日志：说明失败发生在创建传输层之前）';
+      setOut(logText);
+      try {
+        // 方便用户直接粘贴给开发者：失败即把完整日志放进剪贴板
+        await navigator.clipboard.writeText(logText);
+        setError((hint ? (hint + '\n\n') : '') + '原始错误：' + raw
+          + '\n\n完整收发日志已复制到剪贴板，直接 Ctrl+V 粘贴即可。');
+      } catch {
+        setError((hint ? (hint + '\n\n') : '') + '原始错误：' + raw);
       }
+      await flushHdcLog();
     } finally {
       setBusy(false);
     }
