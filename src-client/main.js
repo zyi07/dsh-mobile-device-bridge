@@ -6,7 +6,7 @@ import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
 import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } from './hdc/session.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r63';
+const BUILD_TAG = 'r64';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -261,9 +261,22 @@ async function connectHarmonyInner(t, device) {
     }
     return '';
   };
-  const model = await probe(['const.product.model', 'const.product.name', 'const.product.brand']);
-  const api = await probe(['const.ohos.apiversion', 'const.product.software.version']);
-  const online = await probe(['const.product.devicetype']);
+  // 连接刚建立时设备侧 shell 服务可能还没就绪（抓包显示真 hdc 会等 ~4 秒），
+  // 所以这里先预热 + 多轮重试，直到取到机型为止。
+  let model = '';
+  let api = '';
+  let online = '';
+  for (let round = 1; round <= 5; round++) {
+    if (STATE.connectToken !== token) { break; }
+    model = await probe(['const.product.model', 'const.product.name', 'const.product.brand']);
+    if (model) {
+      api = await probe(['const.ohos.apiversion', 'const.product.software.version']);
+      online = await probe(['const.product.devicetype']);
+      break;
+    }
+    t.emit('INFO', `机型探测第 ${round}/5 轮未取到，1.5 秒后重试`);
+    await new Promise((r) => setTimeout(r, 1500));
+  }
   t.emit('INFO', `探测结果 机型=${model || '?'} API=${api || '?'} 类型=${online || '?'}`);
 
   STATE.hdc = session;

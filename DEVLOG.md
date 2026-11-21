@@ -627,3 +627,20 @@ INFO ← 通道关闭 side=device  ← 我把它当成了本次命令的结束 �
 - `HdcSession.connect()` 在 `open()` 之后、被动监听之后各检查一次 `ensureAlive()`，
   被取代时立即中止，不再发握手
 - 构建标记 r63
+
+## 2026-11-22 01:05 - 鸿蒙端能力实测（全部经宿主桥验证）
+
+| 能力 | 命令/接口 | 结果 |
+|---|---|---|
+| 机型 | `param get const.product.model` | `PLA-AL10` |
+| API | `param get const.ohos.apiversion` | `26` |
+| 系统版本 | `param get const.product.software.version` | `PLA-AL10 7.0.0.111(SP12C00E111R9P3)` |
+| 内核 | `uname -a` | `HarmonyOS ... HongMeng Kernel 1.13.0 aarch64 Toybox` |
+| 应用枚举 | `bm dump -a` | 373 个包 |
+| 存储 | `df -h /data` | 453G / 已用 402G / 可用 51G |
+| 文件写读删 | `/data/local/tmp/dsh_probe.txt` | 14 字节写入并读回，删除正常 |
+| 截图 | `snapshot_display` + `base64` | 1316×2832 JPEG，386KB，两次实测均成功 |
+| 权限边界 | `/data/app/el1/bundle/public` | Permission denied（非 root，符合预期） |
+
+**修复：** 机型探测改为「预热 + 最多 5 轮重试」——连接刚建立时设备侧 shell 尚未就绪
+（抓包显示真 hdc 会等约 4 秒），原先单次探测必然拿不到。构建标记 r64。
