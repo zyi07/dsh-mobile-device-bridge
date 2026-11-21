@@ -6052,16 +6052,21 @@ const IFACE_PROTOCOL = 0x01;
 
 const sleep$1 = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** 生成一个非 0 的 32 位随机 id */
+/**
+ * 生成一个非 0 的 31 位随机 id。
+ *
+ * ⚠️ 必须限制在 2^31-1 以内：真机抓包里 hdc 的 channelId 是 1309532605（< 2^31）。
+ * 我们曾生成到 33 亿（> 2^31），daemon 内部按 int32 处理成负数，
+ * 于是每条命令都**立刻被关闭通道且无输出**。
+ */
 function randomId() {
   let v = 0;
   while (v === 0) {
     const b = new Uint8Array(4);
     crypto.getRandomValues(b);
-    v = ((b[0] << 24) >>> 0) + (b[1] << 16) + (b[2] << 8) + b[3];
-    v = v >>> 0;
+    v = ((((b[0] << 24) >>> 0) + (b[1] << 16) + (b[2] << 8) + b[3]) >>> 0) & 0x7fffffff;
   }
-  return v;
+  return v >>> 0;
 }
 
 function buildUsbHead({ sessionId, dataSize, option = OPT_HEADER }) {
@@ -6586,6 +6591,16 @@ class HdcSession {
    */
   async shell(text, { timeoutMs = 20000 } = {}) {
     if (!this.authorized) { throw new Error('尚未完成 AUTH'); }
+    // 设备偶尔会立刻关闭新通道（无输出）；换一个 channelId 重试一次
+    const first = await this.shellOnce(text, timeoutMs);
+    if (first.text === '' && first.closedEmpty) {
+      this.t.emit('INFO', `命令无输出，换 channelId 重试：${text}`);
+      return await this.shellOnce(text, timeoutMs);
+    }
+    return first;
+  }
+
+  async shellOnce(text, timeoutMs = 20000) {
     const channelId = randomId();
     await this.t.writeFrame({
       sessionId: this.sessionId,
@@ -6621,7 +6636,7 @@ class HdcSession {
         });
       } catch { /* ignore */ }
     }
-    return { text: out };
+    return { text: out, closedEmpty: out === '' };
   }
 
   async close() {
@@ -6714,7 +6729,7 @@ function hexOf(bytes, limit = 256) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r50';
+const BUILD_TAG = 'r51';
 
 const inject = ['slots', 'locale'];
 

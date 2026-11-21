@@ -498,3 +498,33 @@ Chrome 权限与驱动都没问题（设备甚至是 `MS_COMP_WINUSB`，WebUSB �
 - **`open` 阶段失败** → 判定为「被独占」，给出上述可复制的命令，
   而不是误导性的"去装 Android USB Driver"
 - 退避重试 4 次 + 换新鲜句柄重试一次（应对授权瞬间的重新枚举）
+
+## 第 8 轮：AUTH 全链路在浏览器里跑通（2026-11-21 深夜）
+
+### 关键结论
+
+1. **WebUSB 侧绝不能调用 `selectConfiguration`。** 一调用就会重置接口/端点，
+   daemon 之后的发送全部失败（历史日志里的 `SendUSBRaw index failed`），表现为
+   "设备一个字节都不发"。正确做法：直接从 `device.configurations[i].interfaces`
+   描述符树找接口，**先 claim，失败才回退选配置**。
+2. **签名算法是 RSA-PSS（SHA-512，saltLength=64），不是 PKCS#1 v1.5。**
+   用真机抓包的 token + 签名 + 公钥离线验证：v1.5 对所有摘要都不通过，
+   PSS/salt64 一次通过。源码里的 `rsa_3072_sha512` 指摘要，填充是 PSS。
+3. **新密钥需要上机确认。** 提交公钥后若设备回
+   `[E000002] The device unauthorized … DAEMON_UNAUTH`，说明它在等用户在手机上点允许；
+   它**随即关闭会话**，所以不能原地等 token，必须重新握手。实测第 3 轮（用户点允许后）
+   就拿到了 token 并 `authType=4 … SUCCESS`。
+4. **channelId 必须 < 2^31。** 超过时 daemon 按 int32 处理成负数，
+   每条命令都被**立即关闭通道且无输出**。
+
+### 实测通过的顺序（r50 日志）
+
+```
+claim（未选配置）→ RESET → 握手(authType=0, buf=特征串)
+← authType=3 PUBLICKEY（buf 33B "authtype 1 1"）
+→ 送公钥（f5 = 主机名 + 0x0C + PEM）
+← （第1、2轮）authType=4 + E000002 DAEMON_UNAUTH   ← 等用户上机确认
+← （第3轮）authType=2 SIGNATURE，token 20B
+→ 签名（RSA-PSS/SHA-512/salt64，512 字符 base64）
+← authType=4 + "daemonauthstatus7 SUCCESS"         ← AUTH 完成
+```
