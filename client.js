@@ -5634,6 +5634,12 @@ const DAEMON_VERSION = 'Ver: 3.2.0f73c487f8b34a2ba5';
 const FEATURE_STRING =
   'authtype        1               1supportfeatures 29              Ver: 3.2.0f,USB,win,heartbeat';
 
+/** 签名算法：RSA-PSS + SHA-512，salt 长度 = 摘要长度 64。
+ *  实证来源：真机抓包里 hdc 对 20 字节 token 的 384 字节签名，
+ *  只有 PSS/SHA-512/salt=64 能验通（PKCS#1 v1.5 全部验不过）。 */
+const SIG_ALG = { name: 'RSA-PSS', saltLength: 64 };
+const SIG_IMPORT_ALG = { name: 'RSA-PSS', hash: 'SHA-512' };
+
 /** 主机名与 PEM 之间的分隔字节（真机为 0x0C） */
 const HOSTNAME_SEP = 0x0c;
 
@@ -5725,7 +5731,7 @@ function buildPublicKeyBuf(hostname, pemText) {
 async function generateKeyPair() {
   return crypto.subtle.generateKey(
     {
-      name: 'RSASSA-PKCS1-v1_5',
+      name: 'RSA-PSS',
       modulusLength: 3072,
       publicExponent: new Uint8Array([0x01, 0x00, 0x01]),
       hash: 'SHA-512',
@@ -5738,7 +5744,7 @@ async function generateKeyPair() {
 /** 对 token 签名，返回 512 字符 base64（= 384 字节） */
 async function signToken(privateKey, token) {
   const tk = token instanceof Uint8Array ? token : enc.encode(String(token));
-  const sig = await crypto.subtle.sign({ name: 'RSASSA-PKCS1-v1_5' }, privateKey, tk);
+  const sig = await crypto.subtle.sign(SIG_ALG, privateKey, tk);
   return bytesToBase64(new Uint8Array(sig));
 }
 
@@ -6004,7 +6010,7 @@ async function importHdcKey(pemText) {
   const privateKey = await crypto.subtle.importKey(
     'pkcs8',
     b64ToBytes(pkcs8),
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-512' },
+    SIG_IMPORT_ALG,
     false,
     ['sign'],
   );
@@ -6708,7 +6714,7 @@ function hexOf(bytes, limit = 256) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r49';
+const BUILD_TAG = 'r50';
 
 const inject = ['slots', 'locale'];
 

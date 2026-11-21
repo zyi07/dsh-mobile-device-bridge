@@ -154,4 +154,49 @@ await assert.rejects(() => bad.accept(p4), /意外的 authType/);
 console.log('A. 逐字节复现：step1 / step3 / step5 / 命令帧 / 心跳帧 全部与真机一致');
 console.log(`B. 应答解析：daemon 要公钥(33B) / token(${token.length}B) / AUTH_OK(含 SUCCESS) / 输出 / 关闭`);
 console.log('C. 状态机：idle → 等公钥 → 等 token → 等 OK → 已授权，签名 384 字节验证通过');
+
+// ---------------------------------------------------------------- D. 签名算法：必须是 RSA-PSS
+
+{
+  // 用真机抓包里的 token 与签名，验证我们主张的算法参数是正确的
+  const p4 = S.parseHandshakeFrame(hex(F.step4_dev_to_host));
+  const p5 = S.parseHandshakeFrame(hex(F.step5_host_to_dev));
+  const token = p4.buf;
+  const sig = new Uint8Array(Buffer.from(dec.decode(p5.buf), 'base64'));
+  const pubBuf = new Uint8Array(Buffer.from(F.publickey_buf_b64, 'base64'));
+  const { pem } = S.splitPublicKeyBuf(pubBuf);
+  const spki = new Uint8Array(Buffer.from(pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, ''), 'base64'));
+
+  const pssKey = await crypto.subtle.importKey('spki', spki, S.SIG_IMPORT_ALG, false, ['verify']);
+  assert.equal(
+    await crypto.subtle.verify(S.SIG_ALG, pssKey, sig, token),
+    true,
+    '真机签名必须能用 RSA-PSS/SHA-512/salt64 验证通过',
+  );
+
+  // 反向断言：PKCS#1 v1.5 必须验不过（防止有人又把算法改回去）
+  const v15Key = await crypto.subtle.importKey(
+    'spki', spki, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-512' }, false, ['verify'],
+  );
+  assert.equal(
+    await crypto.subtle.verify({ name: 'RSASSA-PKCS1-v1_5' }, v15Key, sig, token),
+    false,
+    'PKCS#1 v1.5 不应验通（若通过说明夹具或算法判断有误）',
+  );
+
+  // 我们自己生成的签名也必须能被同一组参数验证
+  const kp = await S.generateKeyPair();
+  const mySig = await S.signToken(kp.privateKey, token);
+  assert.equal(Buffer.from(mySig, 'base64').length, 384, '签名应为 384 字节');
+  const mySpki = await crypto.subtle.exportKey('spki', kp.publicKey);
+  const myKey = await crypto.subtle.importKey('spki', mySpki, S.SIG_IMPORT_ALG, false, ['verify']);
+  assert.equal(
+    await crypto.subtle.verify(S.SIG_ALG, myKey, new Uint8Array(Buffer.from(mySig, 'base64')), token),
+    true,
+    '自签自验应通过（RSA-PSS/SHA-512/salt64）',
+  );
+
+  console.log('D. 签名算法：真机签名 = RSA-PSS/SHA-512/salt64 ✓（v1.5 验不过，自签自验通过）');
+}
+
 console.log('RESULT: HDC 会话层 OK');

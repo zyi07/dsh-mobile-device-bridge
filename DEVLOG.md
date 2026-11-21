@@ -457,3 +457,43 @@ RX pkt len=451 → INFO ← 握手应答 authType=4(OK) buf=384B
 - 用户粘贴 hdckey + hdckey.pub 后连接，应直接走 token → 签名 → AUTH_OK
 ---
 
+
+## 2026-11-21 23:30 - ★ 找到根因：hdc 用 RSA-PSS，不是 PKCS#1 v1.5
+
+**真机日志（r49，复用 hdckey）：**
+```
+RX authType=3(PUBLICKEY) buf=33B
+TX 公钥 710B
+RX authType=2(SIGNATURE) buf=20B token "7b90f1ce…"
+TX 签名 579B
+RX authType=4(OK) buf=255B
+   "[E000010]:Auth failed, cannt login the device. … DAEMON_UNAUTH"
+```
+token 拿到了、签名也发出去了，但**验签失败** → 问题在签名算法本身。
+
+**离线验签（用真机抓包的 token + 384B 签名 + 公钥）：**
+| 算法 | 结果 |
+|---|---|
+| PKCS#1 v1.5 + SHA-512 / SHA-256 / SHA-1 | ❌ 全不通过 |
+| RSA-PSS + SHA-512 + **saltLength=64** | ✅ **通过** |
+| PSS 其他 salt / SHA-256 | ❌ |
+| 换被签内容（hex 字符串 / 10 字节 / 加 \0） | ❌ |
+
+→ **hdc 使用 RSASSA-PSS（MGF1-SHA512，salt=64）**，所谓 `rsa_3072_sha512` 指摘要，
+   填充是 PSS。我们此前用 PKCS#1 v1.5，必然被判 Auth failed。
+
+**做了什么：**
+- `session.js`：`SIG_ALG = {name:'RSA-PSS', saltLength:64}`、`SIG_IMPORT_ALG = {name:'RSA-PSS', hash:'SHA-512'}`
+- `generateKeyPair()` / `signToken()` / `importHdcKey()` 全部改用 PSS
+- `session.test.mjs` 新增 D 段回归：
+  · 真机签名必须能被 PSS/SHA-512/salt64 验通
+  · **反向断言**：PKCS#1 v1.5 必须验不通（防止算法被改回去）
+  · 自签自验通过、签名恒为 384 字节
+- 额外验证：生成 PSS 私钥 → 导出 PKCS#8 → `importHdcKey` 导入 → 签名 → 原公钥验通；
+  推导出的公钥与 WebCrypto 导出的 SPKI 逐字节一致
+- 构建标记 r50
+
+**待做什么：**
+- 真机连接验证 AUTH_OK + SUCCESS
+---
+
