@@ -6,7 +6,7 @@ import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
 import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } from './hdc/session.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r58';
+const BUILD_TAG = 'r60';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -258,7 +258,9 @@ async function connectHarmonyInner(t, device) {
     serial: device.serialNumber || '',
     vendorId: device.vendorId,
     productId: device.productId,
-    model: model || device.productName || 'HarmonyOS 设备',
+    model: model
+      || ((device.productName && !/HDC|Interface/i.test(device.productName)) ? device.productName : '')
+      || 'HarmonyOS 设备',
     os: api ? `HarmonyOS (API ${api})` : 'HarmonyOS',
     devtype: online,
     auth: authText.split('\n').filter(Boolean).slice(-1)[0] || '',

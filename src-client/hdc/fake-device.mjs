@@ -7,7 +7,7 @@
  * 故意把 IN 方向切成很小的块（默认 7 字节），用来压读取侧的重组逻辑。
  */
 
-import { decodeFrame } from './codec.js';
+import { decodeFrame, encodeFrame } from './codec.js';
 import { parseUsbHead, buildUsbHead, USB_HEAD_SIZE, OPT_HEADER } from './transport.js';
 
 const fromHex = (s) => new Uint8Array(s.match(/../g).map((h) => parseInt(h, 16)));
@@ -37,8 +37,13 @@ export function createFakeHdcDevice({ fixtures, chunkSize = 7 }) {
   };
   const iface = { interfaceNumber: 0, alternate: alt, alternates: [alt] };
 
-  function enqueueFrame(hexFrame) {
-    const frame = fromHex(hexFrame);
+  function rewriteChannel(hexFrame, chId) {
+    const f = decodeFrame(fromHex(hexFrame));
+    return encodeFrame({ channelId: chId >>> 0, commandFlag: f.commandFlag, payload: f.payload });
+  }
+
+  function enqueueFrame(hexFrame, chId) {
+    const frame = chId === undefined ? fromHex(hexFrame) : rewriteChannel(hexFrame, chId);
     const head = buildUsbHead({ sessionId: sid, dataSize: frame.length, option: OPT_HEADER });
     rx.push(head, frame);
   }
@@ -89,9 +94,10 @@ export function createFakeHdcDevice({ fixtures, chunkSize = 7 }) {
       if (auth === 2) { enqueueFrame(fixtures.step6_dev_to_host); return; }
       return;
     }
-    if (f.commandFlag === 1001) {                   // 命令
-      enqueueFrame(fixtures.cmd_reply_frame);       // 输出
-      enqueueFrame(fixtures.close_device_frame);    // 设备侧关闭
+    if (f.commandFlag === 1001) {                   // 命令：真实设备会回显 host 的通道号
+      const ch = f.channelId;
+      enqueueFrame(fixtures.cmd_reply_frame, ch);       // 输出
+      enqueueFrame(fixtures.close_device_frame, ch);    // 设备侧关闭
       return;
     }
     if (f.commandFlag === 2) { return; }            // 主机侧关闭

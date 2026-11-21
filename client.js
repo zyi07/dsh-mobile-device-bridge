@@ -5908,15 +5908,19 @@ function buildHeartbeatFrame({ sessionId, count = 0 }) {
 function parseCommandReply(input) {
   const f = decodeFrame(input);
   if (f.commandFlag === CMD_OUTPUT) {
-    return { kind: 'output', text: dec.decode(f.payload) };
+    return { kind: 'output', text: dec.decode(f.payload), channelId: f.channelId };
   }
   if (f.commandFlag === CMD_CHANNEL_CLOSE) {
-    return { kind: 'close', side: f.payload[0] === 0x01 ? 'device' : 'host' };
+    return {
+      kind: 'close',
+      side: f.payload[0] === 0x01 ? 'device' : 'host',
+      channelId: f.channelId,
+    };
   }
   if (f.commandFlag === CMD_HEARTBEAT) {
     return { kind: 'heartbeat' };
   }
-  return { kind: 'other', commandFlag: f.commandFlag };
+  return { kind: 'other', commandFlag: f.commandFlag, channelId: f.channelId };
 }
 // ---------------------------------------------------------------- 复用已有 HDC 密钥
 
@@ -6647,6 +6651,7 @@ class HdcSession {
 
     const deadline = Date.now() + timeoutMs;
     let out = '';
+    let sawDeviceClose = false;
     try {
       for (;;) {
         const remain = deadline - Date.now();
@@ -6658,21 +6663,32 @@ class HdcSession {
         try { f = decodeFrame(pkt.frame); } catch { continue; }
         if (f.commandFlag === 5000) { continue; }            // 心跳：忽略
         const kind = parseCommandReply(pkt.frame);
+        const mine = kind.channelId === (channelId >>> 0);
         if (kind.kind === 'output') {
-          this.t.emit('INFO', `← 命令输出 flag=10 ${kind.text.length}字符`);
+          if (!mine) {
+            this.t.emit('INFO', `忽略其它通道的输出 ch=0x${(kind.channelId >>> 0).toString(16)}`);
+            continue;
+          }
+          this.t.emit('INFO', `← 命令输出 ${kind.text.length} 字符`);
           out += kind.text;
           continue;
         }
         if (kind.kind === 'close') {
-          this.t.emit('INFO', `← 通道关闭 side=${kind.side}`);
+          if (!mine) {
+            // 设备对"上一个通道"的关闭回执，与本次命令无关
+            this.t.emit('INFO', `忽略其它通道的关闭 ch=0x${(kind.channelId >>> 0).toString(16)}`);
+            continue;
+          }
+          this.t.emit('INFO', `← 本通道关闭 side=${kind.side}`);
+          sawDeviceClose = true;
           if (kind.side === 'device') { break; }
           continue;
         }
         // 其他帧不认识的，忽略继续等
       }
     } finally {
-      // 主机侧也要发关闭（抓包里是 0x00）
-      if (!this.aborted) try {
+      // 只有设备先关闭后才回发 host close；否则会把"设备尚未执行的通道"关掉
+      if (!this.aborted && sawDeviceClose) try {
         await this.t.writeFrame({
           sessionId: this.sessionId,
           frame: buildCloseFrame({ channelId, side: 'host' }),
@@ -6772,7 +6788,7 @@ function hexOf(bytes, limit = 256) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r58';
+const BUILD_TAG = 'r60';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -7020,7 +7036,9 @@ async function connectHarmonyInner(t, device) {
     serial: device.serialNumber || '',
     vendorId: device.vendorId,
     productId: device.productId,
-    model: model || device.productName || 'HarmonyOS 设备',
+    model: model
+      || ((device.productName && !/HDC|Interface/i.test(device.productName)) ? device.productName : '')
+      || 'HarmonyOS 设备',
     os: api ? `HarmonyOS (API ${api})` : 'HarmonyOS',
     devtype: online,
     auth: authText.split('\n').filter(Boolean).slice(-1)[0] || '',

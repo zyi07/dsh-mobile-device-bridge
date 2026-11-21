@@ -340,15 +340,19 @@ export function buildHeartbeatFrame({ sessionId, count = 0 }) {
 export function parseCommandReply(input) {
   const f = decodeFrame(input);
   if (f.commandFlag === CMD_OUTPUT) {
-    return { kind: 'output', text: dec.decode(f.payload) };
+    return { kind: 'output', text: dec.decode(f.payload), channelId: f.channelId };
   }
   if (f.commandFlag === CMD_CHANNEL_CLOSE) {
-    return { kind: 'close', side: f.payload[0] === 0x01 ? 'device' : 'host' };
+    return {
+      kind: 'close',
+      side: f.payload[0] === 0x01 ? 'device' : 'host',
+      channelId: f.channelId,
+    };
   }
   if (f.commandFlag === CMD_HEARTBEAT) {
     return { kind: 'heartbeat' };
   }
-  return { kind: 'other', commandFlag: f.commandFlag };
+  return { kind: 'other', commandFlag: f.commandFlag, channelId: f.channelId };
 }
 // ---------------------------------------------------------------- 复用已有 HDC 密钥
 

@@ -626,6 +626,7 @@ export class HdcSession {
 
     const deadline = Date.now() + timeoutMs;
     let out = '';
+    let sawDeviceClose = false;
     try {
       for (;;) {
         const remain = deadline - Date.now();
@@ -637,21 +638,32 @@ export class HdcSession {
         try { f = decodeFrame(pkt.frame); } catch { continue; }
         if (f.commandFlag === 5000) { continue; }            // 心跳：忽略
         const kind = parseCommandReply(pkt.frame);
+        const mine = kind.channelId === (channelId >>> 0);
         if (kind.kind === 'output') {
-          this.t.emit('INFO', `← 命令输出 flag=10 ${kind.text.length}字符`);
+          if (!mine) {
+            this.t.emit('INFO', `忽略其它通道的输出 ch=0x${(kind.channelId >>> 0).toString(16)}`);
+            continue;
+          }
+          this.t.emit('INFO', `← 命令输出 ${kind.text.length} 字符`);
           out += kind.text;
           continue;
         }
         if (kind.kind === 'close') {
-          this.t.emit('INFO', `← 通道关闭 side=${kind.side}`);
+          if (!mine) {
+            // 设备对"上一个通道"的关闭回执，与本次命令无关
+            this.t.emit('INFO', `忽略其它通道的关闭 ch=0x${(kind.channelId >>> 0).toString(16)}`);
+            continue;
+          }
+          this.t.emit('INFO', `← 本通道关闭 side=${kind.side}`);
+          sawDeviceClose = true;
           if (kind.side === 'device') { break; }
           continue;
         }
         // 其他帧不认识的，忽略继续等
       }
     } finally {
-      // 主机侧也要发关闭（抓包里是 0x00）
-      if (!this.aborted) try {
+      // 只有设备先关闭后才回发 host close；否则会把"设备尚未执行的通道"关掉
+      if (!this.aborted && sawDeviceClose) try {
         await this.t.writeFrame({
           sessionId: this.sessionId,
           frame: buildCloseFrame({ channelId, side: 'host' }),
