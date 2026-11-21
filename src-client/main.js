@@ -5,6 +5,9 @@ import AdbWebCredentialStore from '@yume-chan/adb-credential-web';
 import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
 import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION } from './hdc/session.js';
 
+/** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
+const BUILD_TAG = 'r41';
+
 export const inject = ['slots', 'locale'];
 
 const NS = 'mobile-bridge';
@@ -131,6 +134,9 @@ async function detach() {
 async function connectHarmony(device) {
   const attempt = async (dev) => {
     STATE.log = [];
+    pushHdcLog('INFO', `=== 尝试连接开始 build=${BUILD_TAG} ===`);
+    await flushHdcLog();          // 先落一条，确保宿主侧能看到"这次确实跑了"
+    STATE.log = [];               // 清掉，避免重复
     const t = new HdcTransport(dev, { logger: pushHdcLog });
     try {
       return await connectHarmonyInner(t, dev);
@@ -280,6 +286,9 @@ function startBridge(connection) {
           device: STATE.info
             ? { model: STATE.info.model, android: STATE.info.android, serial: STATE.info.serial }
             : null,
+          // 带上客户端身份与最近日志：宿主会落盘，便于判断浏览器跑的是哪一版
+          build: BUILD_TAG,
+          log: STATE.log && STATE.log.length ? STATE.log.slice(-80) : undefined,
         });
         DIAG.polls += 1;
         DIAG.lastOk = Date.now();
@@ -535,6 +544,7 @@ function MobileBridgeSection(props) {
         ? h('button', { key: 'd', className: 'mb-btn', onClick: disconnect }, t('disconnect'))
         : null,
       h('span', { key: 'b', className: 'mb-badge' }, phaseLabel),
+      h('span', { key: 'build', className: 'mb-badge' }, BUILD_TAG),
     ),
   ];
 

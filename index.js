@@ -200,6 +200,14 @@ export function apply(ctx) {
       diag.lastMethod = method;
       lastSeen = now();
       device = payload.device || null;
+      // 把最近一次 poll 的 payload 落盘：可以据此判断浏览器跑的客户端版本
+      // （旧客户端只发 device，新客户端还会带 log 数组）
+      try {
+        const snap = process.env.MOBILE_BRIDGE_POLL_SNAPSHOT
+          || path.join(process.env.HOME || '/root', '.dsh', 'mbridge-poll.json');
+        fs.writeFileSync(snap, JSON.stringify(payload), 'utf8');
+        diag.pollKeys = Object.keys(payload || {});
+      } catch { /* 落盘失败不影响轮询 */ }
       return okValue({ job: queue.shift() || null, deviceSeen: device });
     });
 
