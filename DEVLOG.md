@@ -180,3 +180,20 @@ console 每 20 次失败打一次 warn。避免再次静默失败。
 - HDC 截图（snapshot_display + file recv）仍未实现
 ---
 
+
+## 2026-11-21 14:00 - 修读取侧重同步：IN 端点残留半帧导致 "UB magic 不对"
+
+**做了什么：**
+- 真机首次进入协议层，报 `UB magic 不对: 10 1`。原因：hdc server 被杀时 IN 端点
+  残留上次会话的半帧（以 `10 01` 开头，是旧会话头 `…10 01 18 00 20 09…` 的残片），
+  严格解析直接抛错
+- `HdcTransport.takeFromBuffer()` 改为**可重同步**：跳过垃圾、扫描 `55 42` 对齐，
+  并校验 `option∈{1,2}`、`dataSize≤1MB`，伪 magic 也只跳 2 字节继续找
+- 新增 `drainIdle()`：claim 之后与 RESET 之后各清一次端点残留
+- 新增 `resyncs` / `dropped` 计数便于诊断
+- `transport.test.mjs` 加第 9 节：用真机的 `10 01 …` 残包与伪 magic 两种情形做回归
+
+**待做什么：**
+- 真机验证 AUTH（首次连接需现场生成 RSA-3072）
+---
+

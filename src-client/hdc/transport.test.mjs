@@ -112,4 +112,39 @@ const F = JSON.parse(readFileSync(new URL('./fixtures.json', import.meta.url), '
   console.log('8. 错误路径：未授权就发命令会被明确拒绝 ✓');
 }
 
+
+// ---------------------------------------------------------------- 9. 读取侧重同步
+
+{
+  const dev = createFakeHdcDevice({ fixtures: F });
+  const t = new HdcTransport(dev);
+  // 注意：先去掉空白，否则 /../g 会把空格也配对，字节全部错位
+  // 只保留十六进制字符，避免空格/换行导致字节错位
+  const hx = (x) => new Uint8Array(x.replace(/[^0-9a-fA-F]/g, '').match(/../g).map((c) => parseInt(c, 16)));
+
+  // 真机上 hdc server 被杀后，IN 端点会残留上次会话的半帧：
+  // 实测首次读到的是以 "10 01" 开头的垃圾，严格解析会直接抛 "UB magic 不对"。
+  const garbage = hx('10 01 18 00 20 09 08 00 12 00');
+  const head = hx('554201' + '25EF0DC9' + '00000063');
+  const frame = hx(F.step2_dev_to_host);
+
+  const all = new Uint8Array([...garbage, ...head, ...frame]);
+  t.rx = all;
+
+  const pkt = t.takeFromBuffer();
+  assert.ok(pkt, '应能从垃圾后重同步出完整包');
+  assert.equal(Buffer.from(pkt.frame).toString('hex').toUpperCase(), F.step2_dev_to_host);
+  assert.equal(t.resyncs, 1, '应记录 1 次重同步');
+  assert.equal(t.dropped, garbage.length, '应丢弃垃圾字节数');
+
+  // 再验一个更刁钻的：垃圾里带 0x55（伪 magic）
+  const tricky = hx('00 55 13 55 42 01 25EF0DC9 00000063' + F.step2_dev_to_host);
+  t.rx = tricky;
+  const pkt2 = t.takeFromBuffer();
+  assert.ok(pkt2, '伪 magic 之后仍应找到真 magic');
+  assert.equal(Buffer.from(pkt2.frame).toString('hex').toUpperCase(), F.step2_dev_to_host);
+
+  console.log(`9. 读取侧重同步：跳过 ${garbage.length}B 残包后正确还原，伪 magic 也不误判 ✓`);
+}
+
 console.log('RESULT: 传输层 + 会话层（离线回放真机字节）全部通过');

@@ -115,6 +115,9 @@ export class HdcTransport {
     this.iface = null;
     this.rx = new Uint8Array(0);
     this.opened = false;
+    // 诊断计数：hdc server 被杀时 IN 端点里会残留半帧，需要重同步
+    this.resyncs = 0;
+    this.dropped = 0;
   }
 
   static async requestDevice(usb, { vendorIds = [0x12d1] } = {}) {
@@ -233,14 +236,74 @@ export class HdcTransport {
     this.rx = next;
   }
 
+  /**
+   * 从缓冲里取一个完整包。
+   *
+   * 必须具备**重同步**能力：设备 IN 端点里常残留上一次会话的半帧
+   * （实测：hdc server 被杀后第一次读会拿到以 `10 01` 开头的残片），
+   * 严格解析会直接抛错。这里的策略是跳过垃圾、对齐到 "UB"(0x55 0x42)。
+   */
   takeFromBuffer() {
-    if (this.rx.length < USB_HEAD_SIZE) { return null; }
-    const head = parseUsbHead(this.rx.subarray(0, USB_HEAD_SIZE));
-    const need = USB_HEAD_SIZE + head.dataSize;
-    if (this.rx.length < need) { return null; }
-    const frame = this.rx.slice(USB_HEAD_SIZE, need);
-    this.rx = this.rx.slice(need);
-    return { head, frame };
+    for (;;) {
+      // —— 对齐到 UB magic ——
+      if (this.rx.length >= 2 && (this.rx[0] !== MAGIC[0] || this.rx[1] !== MAGIC[1])) {
+        let idx = -1;
+        for (let i = 1; i + 1 < this.rx.length; i++) {
+          if (this.rx[i] === MAGIC[0] && this.rx[i + 1] === MAGIC[1]) { idx = i; break; }
+        }
+        if (idx < 0) {
+          // 整段都找不到 magic：只保留末尾可能残缺的 0x55
+          const keep = this.rx[this.rx.length - 1] === MAGIC[0] ? 1 : 0;
+          this.dropped += this.rx.length - keep;
+          this.rx = this.rx.slice(this.rx.length - keep);
+          return null;                    // 需要更多数据才能重新对齐
+        }
+        this.dropped += idx;
+        this.resyncs += 1;
+        this.rx = this.rx.slice(idx);
+      }
+
+      if (this.rx.length < USB_HEAD_SIZE) { return null; }
+
+      let head;
+      try {
+        head = parseUsbHead(this.rx.subarray(0, USB_HEAD_SIZE));
+      } catch {
+        this.dropped += 2;
+        this.rx = this.rx.slice(2);
+        continue;
+      }
+
+      // 头部字段合法性校验：option 只能是 1/2，长度不超过 1MB
+      const optionOk = head.option === OPT_HEADER || head.option === OPT_RESET;
+      if (!optionOk || head.dataSize > (1 << 20)) {
+        this.dropped += 2;
+        this.rx = this.rx.slice(2);
+        continue;
+      }
+
+      const need = USB_HEAD_SIZE + head.dataSize;
+      if (this.rx.length < need) { return null; }
+
+      const frame = this.rx.slice(USB_HEAD_SIZE, need);
+      this.rx = this.rx.slice(need);
+      return { head, frame };
+    }
+  }
+
+  /**
+   * 丢弃端点里的残留数据：claim 之后、RESET 之后都该调一次。
+   * 返回丢弃的包数。
+   */
+  async drainIdle({ timeoutMs = 150, rounds = 20 } = {}) {
+    let got = 0;
+    for (let i = 0; i < rounds; i++) {
+      const p = await this.readPacket({ timeoutMs });
+      if (!p) { break; }
+      got += 1;
+    }
+    this.rx = new Uint8Array(0);       // 清掉不完整的尾巴
+    return got;
   }
 
   async close() {
@@ -274,9 +337,12 @@ export class HdcSession {
   /** 建立连接并完成 AUTH。返回 daemon 的 AUTH_OK 状态文本。 */
   async connect({ resetFirst = true, resetSettleMs = 150 } = {}) {
     await this.t.open();
+    // 上一次会话（如被 kill 的 hdc server）可能在 IN 端点留下半帧，先清干净
+    await this.t.drainIdle({ timeoutMs: 120, rounds: 20 });
     if (resetFirst) {
       await this.t.reset();
       await sleep(resetSettleMs);
+      await this.t.drainIdle({ timeoutMs: 120, rounds: 20 });
     }
     this.sessionId = this.fixedSessionId || randomId();
     const hs = new Handshake({
