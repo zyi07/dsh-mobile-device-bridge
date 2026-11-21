@@ -6,7 +6,7 @@ import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
 import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } from './hdc/session.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r60';
+const BUILD_TAG = 'r62';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -237,7 +237,7 @@ async function connectHarmonyInner(t, device) {
     for (const key of keys) {
       try {
         if (STATE.connectToken !== token) { return ''; }
-        const r = await session.shell(`param get ${key}`, { timeoutMs: 6000, attempts: 1 });
+        const r = await session.shell(`param get ${key}`, { timeoutMs: 6000, attempts: 3 });
         const lines = String(r.text || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
         const val = lines.filter((l) => !l.includes('param get')).pop() || '';
         if (val && !/^\[?E\d/.test(val) && !/^error/i.test(val)) { return val; }
@@ -495,6 +495,25 @@ function MobileBridgeSection(props) {
           if (alive) { setInfo(next); setPhase('connected'); return; }
         }
       } catch { /* 静默失败：交回手动连接 */ }
+
+      // ADB 没连上时再试 HDC：之前授权过的设备可以用 getDevices() 直接拿到，
+      // 密钥已保存在浏览器里，所以重连通常不需要再上机确认。
+      try {
+        if (typeof navigator !== 'undefined' && navigator.usb) {
+          const granted = await navigator.usb.getDevices();
+          const dev = granted.find((d) => d.vendorId === 0x12d1);
+          if (dev && !STATE.hdc && !STATE.adb) {
+            pushHdcLog('INFO', '检测到已授权的鸿蒙设备，尝试自动重连');
+            const token = ++STATE.connectToken;
+            const next = await connectHarmony(dev, token);
+            if (STATE.connectToken !== token) { await detach(); return; }
+            if (alive) { setInfo(next); setKind('hdc'); setCmd('param get const.product.model'); setPhase('connected'); return; }
+          }
+        }
+      } catch (e) {
+        pushHdcLog('INFO', `HDC 自动重连未成功：${(e && e.message) || e}`);
+      }
+
       if (alive) { setPhase('idle'); }
     })();
     return () => { alive = false; };  // 注意：这里不再断开连接

@@ -154,10 +154,16 @@ export function apply(ctx) {
             const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 90000, 1000), 300000);
             const r = await enqueue('screenshot', {}, timeoutMs);
             const fs = await import('node:fs/promises');
-            const file = `/tmp/mobile-shot-${Date.now()}.png`;
             const bytes = Buffer.from(r.base64 || '', 'base64');
+            // 按实际内容决定扩展名：鸿蒙返回 JPEG，安卓返回 PNG
+            const isJpeg = bytes.length > 2 && bytes[0] === 0xff && bytes[1] === 0xd8;
+            const isPng = bytes.length > 8 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+            const ext = isJpeg ? 'jpg' : (isPng ? 'png' : (r.mime === 'image/jpeg' ? 'jpg' : 'bin'));
+            const file = `/tmp/mobile-shot-${Date.now()}.${ext}`;
             await fs.writeFile(file, bytes);
-            send(res, 200, { ok: true, path: file, bytes: bytes.length, device });
+            send(res, 200, {
+              ok: true, path: file, bytes: bytes.length, mime: r.mime || (isJpeg ? 'image/jpeg' : 'image/png'), device,
+            });
             return;
           }
 
