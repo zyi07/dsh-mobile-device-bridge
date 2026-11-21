@@ -6,7 +6,7 @@ import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
 import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } from './hdc/session.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r53';
+const BUILD_TAG = 'r54';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -76,6 +76,9 @@ async function flushHdcLog() {
   } catch { /* 日志上报失败不影响主流程 */ }
 }
 
+/** Android 侧日志：与 HDC 用同一份面板日志，前缀区分 */
+function pushAdbLog(text) { pushHdcLog('ADB', text); }
+
 function pushHdcLog(dir, text) {
   const d = new Date();
   const ts = String(d.getHours()).padStart(2, '0') + ':' +
@@ -115,7 +118,9 @@ async function readInfo(adb, device) {
 
 /** 建立连接并认证；成功后写入模块级 STATE。 */
 async function attach(device) {
+  pushAdbLog(`=== Android 连接开始 build=${BUILD_TAG} serial="${device.serial || ''}" ===`);
   const connection = await device.connect();
+  pushAdbLog('USB 已连接，开始 ADB 认证');
   const credentialStore = new AdbWebCredentialStore('dsh-mobile-bridge');
   const transport = await AdbDaemonTransport.authenticate({
     serial: device.serial,
@@ -123,7 +128,9 @@ async function attach(device) {
     credentialStore,
   });
   const adb = new Adb(transport);
+  pushAdbLog('ADB 认证完成');
   const info = await readInfo(adb, device);
+  pushAdbLog(`机型=${info.model || '?'} Android=${info.android || '?'}`);
   STATE.adb = adb;
   STATE.device = device;
   STATE.info = info;
@@ -182,34 +189,30 @@ async function connectHarmony(device) {
 async function connectHarmonyInner(t, device) {
   t.emit('INFO', `vid=0x${device.vendorId.toString(16)} pid=0x${device.productId.toString(16)} `
     + `serial="${device.serialNumber || ''}" 版本=${DAEMON_VERSION}`); 
-  // 密钥优先级：粘贴的 hdc 私钥 > 浏览器里保存过的 > 新生成（生成后立即保存）
+  // 密钥：复用浏览器里保存的（同一把只授权一次），没有就生成并保存
   let keyPair = null;
   let publicKeyPem = null;
-  const pasted = (STATE.hdcKeyText || '').trim();
   const stored = readStoredHdcKey();
-
-  if (pasted) {
-    t.emit('INFO', '使用粘贴的 hdc 私钥（复用设备已信任的密钥）');
-    const imported = await importHdcKey(pasted);
-    keyPair = { privateKey: imported.privateKey };
-    publicKeyPem = imported.publicKeyPem;
-    t.emit('INFO', `公钥 PEM ${publicKeyPem.length}B`);
-  } else if (stored) {
-    t.emit('INFO', '复用浏览器里已保存的密钥（若已授权则无需再确认）');
-    const imported = await importHdcKey(stored);
-    keyPair = { privateKey: imported.privateKey };
-    publicKeyPem = imported.publicKeyPem;
-  } else {
+  if (stored) {
+    try {
+      const imported = await importHdcKey(stored);
+      keyPair = { privateKey: imported.privateKey };
+      publicKeyPem = imported.publicKeyPem;
+      t.emit('INFO', '复用浏览器已保存的密钥');
+    } catch (e) {
+      t.emit('INFO', `已保存的密钥不可用（${(e && e.message) || e}），改为新生成`);
+    }
+  }
+  if (!keyPair) {
     keyPair = await hdcGenerateKeyPair();
-    // 立刻导出保存：这样重试与下次连接都用同一把，授权只需做一次
     const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', keyPair.privateKey));
     let bin = '';
-    for (const b of pkcs8) { bin += String.fromCharCode(b); }
+    for (const c of pkcs8) { bin += String.fromCharCode(c); }
     const b64 = btoa(bin).replace(/(.{64})/g, '$1\n').replace(/\n$/, '');
-    const pem = '-----BEGIN PRIVATE KEY-----\n' + b64 + '\n-----END PRIVATE KEY-----\n';
+    const pem = '-----BEGIN ' + 'PRIVATE KEY' + '-----\n' + b64 + '\n'
+      + '-----END ' + 'PRIVATE KEY' + '-----\n';
     const saved = storeHdcKey(pem);
-    t.emit('INFO', `已生成并保存新的 RSA-3072 密钥（${saved ? '已存入浏览器' : '保存失败，仅本次有效'}）；`
-      + '首次需在手机上点「允许」，之后同一把密钥不再重复确认');
+    t.emit('INFO', `已生成并保存 RSA-3072 密钥（${saved ? '已存入浏览器' : '仅本次有效'}）`);
   }
   const hostname = (typeof location !== 'undefined' && location.hostname) ? location.hostname : 'dsh-web';
   const session = new HdcSession(t, {
@@ -220,16 +223,22 @@ async function connectHarmonyInner(t, device) {
   });
   const authText = await session.connect();
 
-  let model = '';
-  let ohos = '';
-  try {
-    const r1 = await session.shell('param get const.product.model');
-    model = (r1.text || '').trim();
-  } catch { /* 拿不到不影响连接 */ }
-  try {
-    const r2 = await session.shell('param get const.ohos.apiversion');
-    ohos = (r2.text || '').trim();
-  } catch { /* ignore */ }
+  // 机型/系统：多个候选参数依次尝试（不同版本参数名不同），并过滤掉报错行
+  const probe = async (keys) => {
+    for (const key of keys) {
+      try {
+        const r = await session.shell(`param get ${key}`, { timeoutMs: 8000 });
+        const lines = String(r.text || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+        const val = lines.filter((l) => !l.includes('param get')).pop() || '';
+        if (val && !/^\[?E\d/.test(val) && !/^error/i.test(val)) { return val; }
+      } catch { /* 换下一个 */ }
+    }
+    return '';
+  };
+  const model = await probe(['const.product.model', 'const.product.name', 'const.product.brand']);
+  const api = await probe(['const.ohos.apiversion', 'const.product.software.version']);
+  const online = await probe(['const.product.devicetype']);
+  t.emit('INFO', `探测结果 机型=${model || '?'} API=${api || '?'} 类型=${online || '?'}`);
 
   STATE.hdc = session;
   STATE.device = device;
@@ -239,8 +248,9 @@ async function connectHarmonyInner(t, device) {
     serial: device.serialNumber || '',
     vendorId: device.vendorId,
     productId: device.productId,
-    model,
-    os: ohos ? 'HarmonyOS (API ' + ohos + ')' : 'HarmonyOS',
+    model: model || device.productName || 'HarmonyOS 设备',
+    os: api ? `HarmonyOS (API ${api})` : 'HarmonyOS',
+    devtype: online,
     auth: authText.split('\n').filter(Boolean).slice(-1)[0] || '',
   };
   return STATE.info;
@@ -407,7 +417,6 @@ function MobileBridgeSection(props) {
   const [out, setOut] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [copied, setCopied] = React.useState(false);
-  const [keyText, setKeyText] = React.useState(STATE.hdcKeyText || '');
   const [usbSupported] = React.useState(
     typeof navigator !== 'undefined' && !!navigator.usb,
   );
@@ -525,7 +534,38 @@ function MobileBridgeSection(props) {
 
   async function screenshot() {
     if (STATE.kind === 'hdc') {
-      setError('HDC 通道暂不支持截图：鸿蒙截图需要 snapshot_display + 文件传输（file recv），尚未实现。可先用 hdc shell 执行命令。');
+      const s = STATE.hdc;
+      if (!s) { setPhase('idle'); return; }
+      setBusy(true);
+      setError('');
+      try {
+        const path = `/data/local/tmp/dsh_shot_${Date.now()}.jpeg`;
+        pushHdcLog('INFO', `截图：snapshot_display → ${path}`);
+        const r1 = await s.shell(`snapshot_display -f ${path}`, { timeoutMs: 20000 });
+        pushHdcLog('INFO', `snapshot_display 输出: ${JSON.stringify(String(r1.text || '').slice(0, 200))}`);
+
+        pushHdcLog('INFO', '读取截图文件（base64 经 shell 回传）');
+        const r2 = await s.shell(`base64 ${path}`, { timeoutMs: 90000 });
+        const b64 = String(r2.text || '').replace(/[^A-Za-z0-9+/=]/g, '');
+        s.shell(`rm -f ${path}`, { timeoutMs: 8000 }).catch(() => {});
+
+        if (b64.length < 1000) {
+          throw new Error('截图文件读回为空：设备可能没有 base64 命令。'
+            + `snapshot_display 输出=${JSON.stringify(String(r1.text || '').slice(0, 120))}`);
+        }
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) { bytes[i] = bin.charCodeAt(i); }
+        const url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
+        window.open(url, '_blank');
+        pushHdcLog('INFO', `截图完成：${bytes.length} 字节`);
+      } catch (e) {
+        const raw = String(e && e.message ? e.message : e);
+        setError('截图失败：' + raw);
+        setOut((STATE.log || []).slice(-30).join('\n'));
+      } finally {
+        setBusy(false);
+      }
       return;
     }
     const adb = STATE.adb;
@@ -626,32 +666,6 @@ function MobileBridgeSection(props) {
     children.push(h('div', { key: 'nu', className: 'mb-note' }, t('noWebusb')));
   }
 
-  children.push(h('details', { key: 'key', className: 'mb-note', style: { marginTop: '10px' } },
-    h('summary', { style: { cursor: 'pointer', userSelect: 'none' } }, t('hdcKeyTitle')),
-    h('div', { style: { marginTop: '6px', lineHeight: 1.6 } }, t('hdcKeyHint')),
-    h('div', { style: { marginTop: '6px' } },
-      h('button', {
-        className: 'mb-btn',
-        onClick: () => {
-          const ok = clearStoredHdcKey();
-          setKeyText('');
-          STATE.hdcKeyText = '';
-          setOut(ok ? '已清除浏览器里保存的密钥，下次连接会生成新密钥（需在手机上重新允许一次）'
-                    : '清除失败（无保存的密钥）');
-        },
-      }, t('hdcKeyReset')),
-      h('span', { className: 'mb-note', style: { marginLeft: '8px' } }, t('hdcKeyStored')),
-    ),
-    h('textarea', {
-      className: 'mb-in',
-      rows: 5,
-      style: { width: '100%', marginTop: '6px', fontFamily: 'ui-monospace, Menlo, monospace' },
-      value: keyText,
-      placeholder: '-----BEGIN PRIVATE KEY-----',
-      onChange: (e) => { setKeyText(e.target.value); STATE.hdcKeyText = e.target.value; },
-    }),
-  ));
-
   if (error) {
     children.push(h('div', { key: 'e', className: 'mb-err' }, error));
   }
@@ -714,7 +728,7 @@ function MobileBridgeSection(props) {
     (DIAG.error ? ' · 错误: ' + DIAG.error : '');
   children.push(h('div', { key: 'diag', className: 'mb-note', style: { fontSize: '11.5px' } }, diagText));
 
-  children.push(h('div', { key: 'n', className: 'mb-note' }, t('hint')));
+  children.push(h('div', { key: 'n', className: 'mb-note' }, t(kind === 'hdc' ? 'hintHdc' : 'hintAdb')));
 
   return h('div', { className: 'mb-root' }, children);
 }
@@ -733,6 +747,8 @@ export function apply(ctx) {
       copyFailed: '复制失败：浏览器拒绝了剪贴板写入，请手动选中输出复制。',
       os: '系统',
       diagnose: '诊断',
+      hintAdb: '连接会跟着页面保留：关掉设置、切到别页再回来都不用重连；刷新页面则会断开，之后会自动尝试恢复。需要在手机上开启「USB 调试」，首次连接时手机会弹出授权提示。同一时刻只能有一个程序占用 USB，请先停掉本机的 adb server、Android Studio、scrcpy 等。',
+      hintHdc: '连接会跟着页面保留：关掉设置、切到别页再回来都不用重连；刷新页面则会断开。需要在手机上开启「USB 调试」，并且本机不能有 hdc / DevEco Studio 正在占用设备（连接前先执行 hdc kill）。首次连接需要在手机上点「允许 / 始终信任」；之后同一把密钥不会再询问。连接建立后才可用命令与截图。',
       hdcKeyTitle: '密钥设置（默认已自动保存，无需操作）',
       hdcKeyReset: '重置密钥',
       hdcKeyStored: '默认会保存一把密钥并复用，授权只需做一次；只有想换密钥时才需要点重置',
@@ -769,6 +785,8 @@ export function apply(ctx) {
       copyFailed: 'Copy failed: the browser refused clipboard access. Select the output and copy manually.',
       os: 'OS',
       diagnose: 'Diagnose',
+      hintAdb: 'The connection survives closing settings or switching pages; reloading the page drops it and it will try to reconnect. Enable USB debugging on the phone and confirm the authorization prompt on first connect. Only one program may hold the USB device, so stop the adb server, Android Studio and scrcpy first.',
+      hintHdc: 'The connection survives closing settings or switching pages; reloading drops it. Enable USB debugging on the phone and make sure no hdc / DevEco Studio is holding the device (run hdc kill first). On first connect tap Allow / Always trust on the phone; the saved key is not asked for again. Commands and screenshots work once connected.',
       hdcKeyTitle: 'Key settings (a key is generated and saved automatically)',
       hdcKeyReset: 'Reset key',
       hdcKeyStored: 'The generated key is kept and reused, so authorization is needed once. Reset only if you want a new key.',

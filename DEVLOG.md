@@ -517,3 +517,27 @@ token 拿到了、签名也发出去了，但**验签失败** → 问题在签�
 - 验证命令通道能拿到输出（`param get const.product.model`）
 ---
 
+
+## 2026-11-22 00:10 - 鸿蒙首轮连接成功；UI 分平台文案、去密钥设置、修机型、加截图
+
+**里程碑：** AUTH 打通后，用户实测 **第一轮就连上**（密钥已在设备 `hdc_keys` 中）。
+
+**做了什么：**
+- **移除密钥设置 UI**（折叠区、粘贴框、重置按钮全部不显示）；逻辑保留为
+  「复用浏览器已保存的密钥 → 否则新生成并保存」
+- **文案按平台分开**：`hintAdb` / `hintHdc`，不再用同一段文案（安卓讲 adb server/scrcpy，
+  鸿蒙讲 hdc kill / 上机授权）
+- **Android 侧补日志**：`pushAdbLog()` 复用同一面板日志，记录连接开始、USB 连接、
+  ADB 认证完成、机型/版本、命令与错误 —— 与 HDC 的日志体验一致
+- **修鸿蒙机型识别**：原来只读 `const.product.model`；现在按
+  `const.product.model → name → brand`、`const.ohos.apiversion → product.software.version`
+  依次尝试，并过滤 `param get` 回显与 `[E...]` 报错行；最终兜底用 WebUSB productName
+- **补 HDC 截图**：`snapshot_display -f /data/local/tmp/…jpeg` → `base64 <file>` 经 shell 回传
+  → 浏览器解码成 Blob 打开；失败时给出可诊断信息（含 snapshot 输出）
+- 构建标记 r54
+
+**待做什么：**
+- 真机验证截图链路（尤其设备上是否有 `base64` 命令）
+- 后续可补：文件 push/pull、HAP 安装（复用同一 shell 通道）
+---
+
