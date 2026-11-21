@@ -644,3 +644,27 @@ INFO ← 通道关闭 side=device  ← 我把它当成了本次命令的结束 �
 
 **修复：** 机型探测改为「预热 + 最多 5 轮重试」——连接刚建立时设备侧 shell 尚未就绪
 （抓包显示真 hdc 会等约 4 秒），原先单次探测必然拿不到。构建标记 r64。
+
+## 2026-11-22 01:15 - 文件传输/HAP 安装：先调研，未写代码
+
+**用户要求：先充分联网调研、确认事实，再动手，争取一次通过。**
+
+**已核实（源码 `developtools_hdc` master）：**
+- 命令号：`CMD_FILE_INIT=3000 / CHECK / BEGIN / DATA / FINISH=3004`、
+  `CMD_APP_SIDELOAD=3005`、`CMD_FILE_MODE=3006`、`CMD_DIR_MODE=3007`、
+  `CMD_APP_INIT=3500 … UNINSTALL=3505`
+- `TransferPayload{uint64 index; uint8 compressType; uint32 compressSize; uint32 uncompressSize}`
+- `TransferConfig{fileSize,atime,mtime,options,path,optionalName,updateIfNew,
+   compressType,holdTimestamp,functionName,clientCwd,reserve1,reserve2}`
+- 序列化为 **protobuf 兼容线格式**（tag<<3|wiretype；uint→VARINT；string→LEN；
+  每包 **64 字节前缀** + '\0' + 数据）
+- HAP 安装：必须签名；**调试签名绑定设备 UDID**；`hdc install [-r]`；`-s` 装 HSP；
+  错误码 9568322/9568266/9568337
+
+**明确标为"未实证"的 8 项**（列在文档第二节），必须抓包确认后才写代码。
+
+**交付：** `docs/HDC_FILE_INSTALL_RESEARCH.md`（调研 + 抓包任务 + 分步实施方案 + 风险）
+
+**待做什么：**
+- 用户重连设备并跑第 6 轮 shim 抓 `file send/recv`、`install`、`bm get --udid`
+- 拿到字节后先写 `transfer-codec.js` + 逐字节回归测试
