@@ -6,7 +6,7 @@ import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
 import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } from './hdc/session.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r54';
+const BUILD_TAG = 'r56';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -544,14 +544,23 @@ function MobileBridgeSection(props) {
         const r1 = await s.shell(`snapshot_display -f ${path}`, { timeoutMs: 20000 });
         pushHdcLog('INFO', `snapshot_display 输出: ${JSON.stringify(String(r1.text || '').slice(0, 200))}`);
 
-        pushHdcLog('INFO', '读取截图文件（base64 经 shell 回传）');
-        const r2 = await s.shell(`base64 ${path}`, { timeoutMs: 90000 });
-        const b64 = String(r2.text || '').replace(/[^A-Za-z0-9+/=]/g, '');
+        // 先确认文件是否真的生成了（区分"截图没成功"与"没有 base64 命令"）
+        const rLs = await s.shell(`ls -l ${path}`, { timeoutMs: 8000 });
+        pushHdcLog('INFO', `ls -l 结果: ${JSON.stringify(String(rLs.text || '').slice(0, 200))}`);
+
+        let b64 = '';
+        for (const cmd of [`base64 ${path}`, `base64 -w0 ${path}`, `cat ${path} | base64`]) {
+          const r = await s.shell(cmd, { timeoutMs: 90000 });
+          const cand = String(r.text || '').replace(/[^A-Za-z0-9+/=]/g, '');
+          pushHdcLog('INFO', `${cmd} → ${cand.length} 字符`);
+          if (cand.length > 1000) { b64 = cand; break; }
+        }
         s.shell(`rm -f ${path}`, { timeoutMs: 8000 }).catch(() => {});
 
-        if (b64.length < 1000) {
-          throw new Error('截图文件读回为空：设备可能没有 base64 命令。'
-            + `snapshot_display 输出=${JSON.stringify(String(r1.text || '').slice(0, 120))}`);
+        if (!b64) {
+          throw new Error('截图文件读回为空。'
+            + `snapshot_display 输出=${JSON.stringify(String(r1.text || '').slice(0, 100))}；`
+            + `ls -l=${JSON.stringify(String(rLs.text || '').slice(0, 100))}`);
         }
         const bin = atob(b64);
         const bytes = new Uint8Array(bin.length);

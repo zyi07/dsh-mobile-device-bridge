@@ -557,7 +557,7 @@ export class HdcSession {
         frame: buildCloseFrame({ channelId: 0, side: 'host' }),
       });
       this.t.emit('INFO', '已关闭握手通道(0)');
-      await sleep(60);
+      await sleep(400);
     } catch (e) {
       this.t.emit('INFO', `关闭握手通道失败: ${(e && e.message) || e}`);
     }
@@ -583,15 +583,19 @@ export class HdcSession {
    * 执行一条命令。返回 { text, codes }。
    * 依据抓包：一条命令 = 1 个输出帧 + 1 个关闭帧。
    */
-  async shell(text, { timeoutMs = 20000 } = {}) {
+  async shell(text, { timeoutMs = 20000, attempts = 3, retryDelayMs = 1200 } = {}) {
     if (!this.authorized) { throw new Error('尚未完成 AUTH'); }
-    // 设备偶尔会立刻关闭新通道（无输出）；换一个 channelId 重试一次
-    const first = await this.shellOnce(text, timeoutMs);
-    if (first.text === '' && first.closedEmpty) {
-      this.t.emit('INFO', `命令无输出，换 channelId 重试：${text}`);
-      return await this.shellOnce(text, timeoutMs);
+    let last = null;
+    for (let i = 1; i <= attempts; i++) {
+      last = await this.shellOnce(text, timeoutMs);
+      if (last.text !== '') { return last; }
+      if (i < attempts) {
+        this.t.emit('INFO', `命令无输出（第 ${i}/${attempts} 次），${retryDelayMs}ms 后换通道重试：${text}`);
+        await sleep(retryDelayMs);
+      }
     }
-    return first;
+    this.t.emit('INFO', `命令始终无输出：${text}`);
+    return last;
   }
 
   async shellOnce(text, timeoutMs = 20000) {
@@ -614,8 +618,13 @@ export class HdcSession {
         try { f = decodeFrame(pkt.frame); } catch { continue; }
         if (f.commandFlag === 5000) { continue; }            // 心跳：忽略
         const kind = parseCommandReply(pkt.frame);
-        if (kind.kind === 'output') { out += kind.text; continue; }
+        if (kind.kind === 'output') {
+          this.t.emit('INFO', `← 命令输出 flag=10 ${kind.text.length}字符`);
+          out += kind.text;
+          continue;
+        }
         if (kind.kind === 'close') {
+          this.t.emit('INFO', `← 通道关闭 side=${kind.side}`);
           if (kind.side === 'device') { break; }
           continue;
         }

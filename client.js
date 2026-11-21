@@ -6578,7 +6578,7 @@ class HdcSession {
         frame: buildCloseFrame({ channelId: 0, side: 'host' }),
       });
       this.t.emit('INFO', '已关闭握手通道(0)');
-      await sleep$1(60);
+      await sleep$1(400);
     } catch (e) {
       this.t.emit('INFO', `关闭握手通道失败: ${(e && e.message) || e}`);
     }
@@ -6604,15 +6604,19 @@ class HdcSession {
    * 执行一条命令。返回 { text, codes }。
    * 依据抓包：一条命令 = 1 个输出帧 + 1 个关闭帧。
    */
-  async shell(text, { timeoutMs = 20000 } = {}) {
+  async shell(text, { timeoutMs = 20000, attempts = 3, retryDelayMs = 1200 } = {}) {
     if (!this.authorized) { throw new Error('尚未完成 AUTH'); }
-    // 设备偶尔会立刻关闭新通道（无输出）；换一个 channelId 重试一次
-    const first = await this.shellOnce(text, timeoutMs);
-    if (first.text === '' && first.closedEmpty) {
-      this.t.emit('INFO', `命令无输出，换 channelId 重试：${text}`);
-      return await this.shellOnce(text, timeoutMs);
+    let last = null;
+    for (let i = 1; i <= attempts; i++) {
+      last = await this.shellOnce(text, timeoutMs);
+      if (last.text !== '') { return last; }
+      if (i < attempts) {
+        this.t.emit('INFO', `命令无输出（第 ${i}/${attempts} 次），${retryDelayMs}ms 后换通道重试：${text}`);
+        await sleep$1(retryDelayMs);
+      }
     }
-    return first;
+    this.t.emit('INFO', `命令始终无输出：${text}`);
+    return last;
   }
 
   async shellOnce(text, timeoutMs = 20000) {
@@ -6635,8 +6639,13 @@ class HdcSession {
         try { f = decodeFrame(pkt.frame); } catch { continue; }
         if (f.commandFlag === 5000) { continue; }            // 心跳：忽略
         const kind = parseCommandReply(pkt.frame);
-        if (kind.kind === 'output') { out += kind.text; continue; }
+        if (kind.kind === 'output') {
+          this.t.emit('INFO', `← 命令输出 flag=10 ${kind.text.length}字符`);
+          out += kind.text;
+          continue;
+        }
         if (kind.kind === 'close') {
+          this.t.emit('INFO', `← 通道关闭 side=${kind.side}`);
           if (kind.side === 'device') { break; }
           continue;
         }
@@ -6744,7 +6753,7 @@ function hexOf(bytes, limit = 256) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r54';
+const BUILD_TAG = 'r56';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -7278,14 +7287,23 @@ function MobileBridgeSection(props) {
         const r1 = await s.shell(`snapshot_display -f ${path}`, { timeoutMs: 20000 });
         pushHdcLog('INFO', `snapshot_display 输出: ${JSON.stringify(String(r1.text || '').slice(0, 200))}`);
 
-        pushHdcLog('INFO', '读取截图文件（base64 经 shell 回传）');
-        const r2 = await s.shell(`base64 ${path}`, { timeoutMs: 90000 });
-        const b64 = String(r2.text || '').replace(/[^A-Za-z0-9+/=]/g, '');
+        // 先确认文件是否真的生成了（区分"截图没成功"与"没有 base64 命令"）
+        const rLs = await s.shell(`ls -l ${path}`, { timeoutMs: 8000 });
+        pushHdcLog('INFO', `ls -l 结果: ${JSON.stringify(String(rLs.text || '').slice(0, 200))}`);
+
+        let b64 = '';
+        for (const cmd of [`base64 ${path}`, `base64 -w0 ${path}`, `cat ${path} | base64`]) {
+          const r = await s.shell(cmd, { timeoutMs: 90000 });
+          const cand = String(r.text || '').replace(/[^A-Za-z0-9+/=]/g, '');
+          pushHdcLog('INFO', `${cmd} → ${cand.length} 字符`);
+          if (cand.length > 1000) { b64 = cand; break; }
+        }
         s.shell(`rm -f ${path}`, { timeoutMs: 8000 }).catch(() => {});
 
-        if (b64.length < 1000) {
-          throw new Error('截图文件读回为空：设备可能没有 base64 命令。'
-            + `snapshot_display 输出=${JSON.stringify(String(r1.text || '').slice(0, 120))}`);
+        if (!b64) {
+          throw new Error('截图文件读回为空。'
+            + `snapshot_display 输出=${JSON.stringify(String(r1.text || '').slice(0, 100))}；`
+            + `ls -l=${JSON.stringify(String(rLs.text || '').slice(0, 100))}`);
         }
         const bin = atob(b64);
         const bytes = new Uint8Array(bin.length);
