@@ -6,7 +6,7 @@ import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
 import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION } from './hdc/session.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r45';
+const BUILD_TAG = 'r46';
 
 export const inject = ['slots', 'locale'];
 
@@ -47,6 +47,7 @@ const STATE = {
   pending: null,      // 挂载时静默重连的进行中 Promise
   kind: null,         // 'adb' | 'hdc'
   log: [],            // HDC 收发日志（失败时显示到输出区）
+  notify: null,       // 面板注册的实时刷新回调
   connection: null,   // 宿主 RPC 连接（用于把 HDC 日志送到宿主落盘）
 };
 
@@ -67,6 +68,8 @@ function pushHdcLog(dir, text) {
     String(d.getMilliseconds()).padStart(3, '0');
   STATE.log.push(`${ts} ${dir} ${text}`);
   if (STATE.log.length > 400) { STATE.log.shift(); }
+  // 实时推到面板，用户能看到"请在手机上点允许"这类提示
+  if (STATE.notify) { try { STATE.notify(STATE.log.join('\n')); } catch { /* ignore */ } }
 }
 
 if (typeof window !== 'undefined') {
@@ -366,7 +369,8 @@ function MobileBridgeSection(props) {
   const [, setTick] = React.useState(0);
   React.useEffect(() => {
     const id = setInterval(() => setTick((n) => n + 1), 2000);
-    return () => clearInterval(id);
+    STATE.notify = (text) => setOut(text);
+    return () => { clearInterval(id); if (STATE.notify) { STATE.notify = null; } };
   }, []);
 
   // 挂载时：若模块里已有连接就复用；否则尝试静默重连（不需要用户手势，

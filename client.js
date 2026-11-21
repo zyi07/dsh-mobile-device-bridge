@@ -6349,33 +6349,74 @@ class HdcSession {
     let frame = await hs.start();
     await this.t.writeFrame({ sessionId: this.sessionId, frame });
 
-    for (let step = 0; step < 6; step++) {
-      let pkt = await this.t.readPacket({ timeoutMs: 8000 });
-      if (!pkt && step === 0) {
-        this.t.emit('INFO', '首帧无应答，重发第 1 帧一次');
-        await this.t.drainIdle({ timeoutMs: 100, rounds: 5 });
-        await this.t.writeFrame({ sessionId: this.sessionId, frame });
-        pkt = await this.t.readPacket({ timeoutMs: 8000 });
+    const AUTH_NAMES = { 0: 'NONE', 1: 'TOKEN', 2: 'SIGNATURE', 3: 'PUBLICKEY', 4: 'OK', 5: 'FAIL' };
+    let resendDone = false;
+    let lastFrame = frame;         // 最后发出的握手帧（确认期间用于催应答）
+    let lastNudge = 0;
+    let confirmDeadline = 0;      // 设备要求"上机确认"后的等待截止时间
+    const HARD_DEADLINE = Date.now() + 120000;
+
+    for (let guard = 0; guard < 60; guard++) {
+      if (Date.now() > HARD_DEADLINE) { throw new Error('握手总超时（120 秒）'); }
+
+      const timeoutMs = confirmDeadline ? 15000 : 8000;
+      const pkt = await this.t.readPacket({ timeoutMs });
+
+      if (!pkt) {
+        if (confirmDeadline && Date.now() < confirmDeadline) {
+          // 用户可能已经点了允许，但 daemon 没主动发 token：定期重发公钥帧催一次
+          if (Date.now() - lastNudge > 12000) {
+            lastNudge = Date.now();
+            this.t.emit('INFO', '等待确认中…重发公钥帧以获取 token');
+            await this.t.writeFrame({ sessionId: this.sessionId, frame: lastFrame });
+          }
+          continue;
+        }
+        if (!resendDone) {
+          resendDone = true;
+          this.t.emit('INFO', '首帧无应答，重发第 1 帧一次');
+          await this.t.drainIdle({ timeoutMs: 100, rounds: 5 });
+          await this.t.writeFrame({ sessionId: this.sessionId, frame });
+          continue;
+        }
+        throw new Error(`握手超时（等待应答失败${confirmDeadline ? '，设备上可能还没点允许' : ''}）`);
       }
-      if (!pkt) { throw new Error(`握手超时（第 ${step + 1} 次等待应答）`); }
       if (pkt.head.option !== OPT_HEADER) { continue; }
+
+      // 过滤其它会话残留的包（设备侧会缓存上一次会话的应答）
+      if (pkt.head.sessionId !== (this.sessionId >>> 0)) {
+        this.t.emit('INFO', `忽略其它会话的包 sid=0x${(pkt.head.sessionId >>> 0).toString(16).toUpperCase()}`);
+        continue;
+      }
+
       let reply;
       try { reply = tryParseHandshakeFrame(pkt.frame); } catch { continue; }
-      if (!reply) { continue; }        // 心跳等非握手帧，跳过继续等
-      const AUTH_NAMES = { 0: 'NONE', 1: 'TOKEN', 2: 'SIGNATURE', 3: 'PUBLICKEY', 4: 'OK', 5: 'FAIL' };
+      if (!reply) { continue; }
+
       const bufText = [...reply.buf].filter((c) => c >= 32 && c < 127).length >= 4
-        ? new TextDecoder().decode(reply.buf.slice(0, 160))
-        : '';
+        ? decodeText(reply.buf.slice(0, 200)) : '';
       this.t.emit('INFO', `← 握手应答 authType=${reply.authType}(${AUTH_NAMES[reply.authType] || '?'}) `
         + `sid=${reply.sessionId} connectKey=${reply.connectKey.length}B buf=${reply.buf.length}B`);
       if (bufText) { this.t.emit('INFO', `   buf 文本: ${JSON.stringify(bufText)}`); }
       this.t.emit('HEX', `reply-frame ${pkt.frame.length}B: ${hexOf(pkt.frame, 512)}`);
+
+      // ★ 关键分支：daemon 说"未授权，请在上机确认"。
+      // 这不是失败：用户点允许后它还会发 token。继续等，并把提示打到面板。
+      if (reply.authType === AUTH_OK && /UNAUTH|unauthorized|not set/i.test(bufText)) {
+        if (!confirmDeadline) {
+          confirmDeadline = Date.now() + 90000;
+          this.t.emit('INFO', '★ 请在手机上点「允许 / 始终信任」，然后保持此页面不要关闭（最多等 90 秒）');
+        }
+        continue;
+      }
+
       const next = await hs.accept(reply);
       this.info = reply;
       if (next === null) {
         this.authorized = true;
         break;
       }
+      lastFrame = next;
       await this.t.writeFrame({ sessionId: hs.sessionId, frame: next });
     }
     if (!this.authorized) { throw new Error('握手未完成'); }
@@ -6530,7 +6571,7 @@ function hexOf(bytes, limit = 256) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r45';
+const BUILD_TAG = 'r46';
 
 const inject = ['slots', 'locale'];
 
@@ -6571,6 +6612,7 @@ const STATE = {
   pending: null,      // 挂载时静默重连的进行中 Promise
   kind: null,         // 'adb' | 'hdc'
   log: [],            // HDC 收发日志（失败时显示到输出区）
+  notify: null,       // 面板注册的实时刷新回调
   connection: null,   // 宿主 RPC 连接（用于把 HDC 日志送到宿主落盘）
 };
 
@@ -6591,6 +6633,8 @@ function pushHdcLog(dir, text) {
     String(d.getMilliseconds()).padStart(3, '0');
   STATE.log.push(`${ts} ${dir} ${text}`);
   if (STATE.log.length > 400) { STATE.log.shift(); }
+  // 实时推到面板，用户能看到"请在手机上点允许"这类提示
+  if (STATE.notify) { try { STATE.notify(STATE.log.join('\n')); } catch { /* ignore */ } }
 }
 
 if (typeof window !== 'undefined') {
@@ -6890,7 +6934,8 @@ function MobileBridgeSection(props) {
   const [, setTick] = React.useState(0);
   React.useEffect(() => {
     const id = setInterval(() => setTick((n) => n + 1), 2000);
-    return () => clearInterval(id);
+    STATE.notify = (text) => setOut(text);
+    return () => { clearInterval(id); if (STATE.notify) { STATE.notify = null; } };
   }, []);
 
   // 挂载时：若模块里已有连接就复用；否则尝试静默重连（不需要用户手势，

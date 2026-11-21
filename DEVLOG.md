@@ -354,3 +354,36 @@ RX pkt opt=1 sid=0x99D75AA8 len=451    ← 设备回了 451B（抓包里 token �
   若是分片或其他 → 修读取与状态机
 ---
 
+
+## 2026-11-21 22:40 - 破译 451 字节应答：DAEMON_UNAUTH，需要上机确认
+
+**真机 r45 日志（关键行）：**
+```
+RX pkt len=99  → INFO ← 握手应答 authType=3(PUBLICKEY) buf=33B "authtype        1               1"
+TX frame 710B（送公钥）
+RX pkt len=451 → INFO ← 握手应答 authType=4(OK) buf=384B
+  buf 文本: "emgmsg 175 [E000002]:The device unauthorized.
+             This server's public key is not set.
+             Please check for a confirmation dialog on your device. …
+             daemonauthstatus13  DAEMON_UNAUTH
+             1200 6 enablesupportfeatures 21 heartbeat,encrypt_tcp"
+```
+
+**结论：设备接受了我们的公钥，但该密钥尚未授权，需要用户在手机上点确认。**
+抓包里之所以直接返回 token，是因为那把密钥当时已被信任。
+
+另一发现：被动监听这次收到 4 个包（含 86B 握手帧），是**上一次会话残留在设备侧的应答**；
+需要按 UB 头的 sid 过滤掉不属于当前会话的包。
+
+**做了什么：**
+- `authType=4` 且 buf 含 `UNAUTH` → **不判失败**，改为进入"等待上机确认"：
+  面板提示「请在手机上点允许/始终信任」，最多等 90 秒
+- 等待期间每 12 秒**重发一次公钥帧**催 token
+- 按 `UB sid` 过滤其它会话的残留包
+- 日志**实时上屏**（`STATE.notify`），用户能看到提示而不用等失败
+- 构建标记 r46
+
+**待做什么：**
+- 用户在手机上点允许，观察 daemon 是否回 token（authType=2）
+---
+

@@ -18,7 +18,7 @@
  */
 
 import { decodeFrame, splitFrames } from './codec.js';
-import { Handshake, buildCommandFrame, buildCloseFrame, buildHeartbeatFrame, parseCommandReply, tryParseHandshakeFrame } from './session.js';
+import { Handshake, buildCommandFrame, buildCloseFrame, buildHeartbeatFrame, parseCommandReply, tryParseHandshakeFrame, AUTH_OK } from './session.js';
 
 export const OPT_HEADER = 1;
 export const OPT_RESET = 2;
@@ -438,33 +438,74 @@ export class HdcSession {
     let frame = await hs.start();
     await this.t.writeFrame({ sessionId: this.sessionId, frame });
 
-    for (let step = 0; step < 6; step++) {
-      let pkt = await this.t.readPacket({ timeoutMs: 8000 });
-      if (!pkt && step === 0) {
-        this.t.emit('INFO', '首帧无应答，重发第 1 帧一次');
-        await this.t.drainIdle({ timeoutMs: 100, rounds: 5 });
-        await this.t.writeFrame({ sessionId: this.sessionId, frame });
-        pkt = await this.t.readPacket({ timeoutMs: 8000 });
+    const AUTH_NAMES = { 0: 'NONE', 1: 'TOKEN', 2: 'SIGNATURE', 3: 'PUBLICKEY', 4: 'OK', 5: 'FAIL' };
+    let resendDone = false;
+    let lastFrame = frame;         // 最后发出的握手帧（确认期间用于催应答）
+    let lastNudge = 0;
+    let confirmDeadline = 0;      // 设备要求"上机确认"后的等待截止时间
+    const HARD_DEADLINE = Date.now() + 120000;
+
+    for (let guard = 0; guard < 60; guard++) {
+      if (Date.now() > HARD_DEADLINE) { throw new Error('握手总超时（120 秒）'); }
+
+      const timeoutMs = confirmDeadline ? 15000 : 8000;
+      const pkt = await this.t.readPacket({ timeoutMs });
+
+      if (!pkt) {
+        if (confirmDeadline && Date.now() < confirmDeadline) {
+          // 用户可能已经点了允许，但 daemon 没主动发 token：定期重发公钥帧催一次
+          if (Date.now() - lastNudge > 12000) {
+            lastNudge = Date.now();
+            this.t.emit('INFO', '等待确认中…重发公钥帧以获取 token');
+            await this.t.writeFrame({ sessionId: this.sessionId, frame: lastFrame });
+          }
+          continue;
+        }
+        if (!resendDone) {
+          resendDone = true;
+          this.t.emit('INFO', '首帧无应答，重发第 1 帧一次');
+          await this.t.drainIdle({ timeoutMs: 100, rounds: 5 });
+          await this.t.writeFrame({ sessionId: this.sessionId, frame });
+          continue;
+        }
+        throw new Error(`握手超时（等待应答失败${confirmDeadline ? '，设备上可能还没点允许' : ''}）`);
       }
-      if (!pkt) { throw new Error(`握手超时（第 ${step + 1} 次等待应答）`); }
       if (pkt.head.option !== OPT_HEADER) { continue; }
+
+      // 过滤其它会话残留的包（设备侧会缓存上一次会话的应答）
+      if (pkt.head.sessionId !== (this.sessionId >>> 0)) {
+        this.t.emit('INFO', `忽略其它会话的包 sid=0x${(pkt.head.sessionId >>> 0).toString(16).toUpperCase()}`);
+        continue;
+      }
+
       let reply;
       try { reply = tryParseHandshakeFrame(pkt.frame); } catch { continue; }
-      if (!reply) { continue; }        // 心跳等非握手帧，跳过继续等
-      const AUTH_NAMES = { 0: 'NONE', 1: 'TOKEN', 2: 'SIGNATURE', 3: 'PUBLICKEY', 4: 'OK', 5: 'FAIL' };
+      if (!reply) { continue; }
+
       const bufText = [...reply.buf].filter((c) => c >= 32 && c < 127).length >= 4
-        ? new TextDecoder().decode(reply.buf.slice(0, 160))
-        : '';
+        ? decodeText(reply.buf.slice(0, 200)) : '';
       this.t.emit('INFO', `← 握手应答 authType=${reply.authType}(${AUTH_NAMES[reply.authType] || '?'}) `
         + `sid=${reply.sessionId} connectKey=${reply.connectKey.length}B buf=${reply.buf.length}B`);
       if (bufText) { this.t.emit('INFO', `   buf 文本: ${JSON.stringify(bufText)}`); }
       this.t.emit('HEX', `reply-frame ${pkt.frame.length}B: ${hexOf(pkt.frame, 512)}`);
+
+      // ★ 关键分支：daemon 说"未授权，请在上机确认"。
+      // 这不是失败：用户点允许后它还会发 token。继续等，并把提示打到面板。
+      if (reply.authType === AUTH_OK && /UNAUTH|unauthorized|not set/i.test(bufText)) {
+        if (!confirmDeadline) {
+          confirmDeadline = Date.now() + 90000;
+          this.t.emit('INFO', '★ 请在手机上点「允许 / 始终信任」，然后保持此页面不要关闭（最多等 90 秒）');
+        }
+        continue;
+      }
+
       const next = await hs.accept(reply);
       this.info = reply;
       if (next === null) {
         this.authorized = true;
         break;
       }
+      lastFrame = next;
       await this.t.writeFrame({ sessionId: hs.sessionId, frame: next });
     }
     if (!this.authorized) { throw new Error('握手未完成'); }
