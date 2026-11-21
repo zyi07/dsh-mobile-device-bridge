@@ -290,3 +290,34 @@ console 每 20 次失败打一次 warn。避免再次静默失败。
 - 让用户先跑 `hdc list targets -v` 证明 daemon 是否在发数据，再 `hdc kill` 后跑 probe8
 ---
 
+
+## 2026-11-21 22:30 - 协议被 libusb 探针证实；WebUSB 侧改用「不选配置直接 claim」
+
+**证据（probe8 第一次运行，设备刚 kill 完 hdc）：**
+```
+[pre] IN 11B UB sid=0x307ABD85 len=24          ← 设备自发心跳，计数器递增
+[V1]  IN 11B UB sid=0x25EF0DC9 len=0x63
+[V1]  IN 99B flag=1 authType=3 buf_len=33 "authtype        1               1"
+→ 收到 2 个包（有回音！）
+```
+→ **真机第 1 帧原样重放即可拿到 daemon 的 AUTH_PUBLICKEY 应答**，协议/字段/时序全部正确。
+V2 随机 sid 无回音属正常（会话已绑定 0x25EF0DC9，换 sid 被判 softreset）。
+第二次运行时写操作 rc=-9/-1，属端点被上一次异常收尾挂住，需 clearHalt 或重插。
+
+**关键对照：** libusb 能收到心跳，WebUSB 一个字节都收不到。两者最大差异是
+**libusb 从不调用 SET_CONFIGURATION**，而 WebUSB 里我们总是先 `selectConfiguration`。
+SET_CONFIGURATION 会重置所有接口/端点，正好能解释 daemon 侧 `SendUSBRaw index failed`。
+
+**做了什么：**
+- `HdcTransport.open()`：**先尝试不选配置直接 `claimInterface`**，失败才回退到
+  `selectConfiguration` + 重新 claim；两条路径都记日志
+- 新增 `findHdcInterfaceFromConfigurations()`：从 `device.configurations[i].interfaces`
+  描述符树找接口（不需要先选配置）
+- `writeOut()`：写失败时 `clearHalt(in/out)` 后重试一次
+- 假设备同步建模 `configurations[i].interfaces`，9 项离线测试仍全绿
+- 构建标记 r44
+
+**待做什么：**
+- 真机验证：F5 → hdc kill → 连接；看是否收到心跳与 authType=3
+---
+

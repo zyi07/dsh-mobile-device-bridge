@@ -101,7 +101,8 @@ export function createFakeHdcDevice({ fixtures, chunkSize = 7 }) {
   const device = {
     get opened() { return opened; },
     configuration: null,
-    configurations: [{ configurationValue: 1 }],
+    // 描述符树：真实 WebUSB 中 device.configurations[i].interfaces 随时可读
+    configurations: [{ configurationValue: 1, interfaces: [iface] }],
 
     async open() { opened = true; },
     async close() { opened = false; },

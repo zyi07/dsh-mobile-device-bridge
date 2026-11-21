@@ -5966,6 +5966,30 @@ function parseUsbHead(bytes) {
   };
 }
 
+/**
+ * 不选配置也能找接口：直接用 getConfiguration 拿到的描述符树。
+ * WebUSB 里 device.configuration 只有在 selectConfiguration 之后才有值，
+ * 而 device.configurations 是描述符本身，随时可读。
+ */
+function findHdcInterfaceFromConfigurations(device) {
+  if (device.configuration) { return findHdcInterface(device); }
+  const cfgs = device.configurations || [];
+  for (const cfg of cfgs) {
+    for (const iface of cfg.interfaces || []) {
+      for (const alt of [iface.alternate, ...(iface.alternates || [])]) {
+        if (!alt) { continue; }
+        if (alt.interfaceClass === IFACE_CLASS
+          && alt.interfaceSubclass === IFACE_SUBCLASS
+          && alt.interfaceProtocol === IFACE_PROTOCOL) {
+          const eps = findBulkEndpoints(alt);
+          if (eps) { return { interfaceNumber: iface.interfaceNumber, ...eps }; }
+        }
+      }
+    }
+  }
+  throw new Error('描述符里找不到 HDC 接口（class 0xFF/0x50/0x01）');
+}
+
 /** 在 WebUSB 设备里找 HDC 接口与该接口的两个 bulk 端点 */
 function findHdcInterface(device) {
   const config = device.configuration;
@@ -6032,7 +6056,7 @@ class HdcTransport {
    * 打开并 claim。带重试：手机在"始终信任"授权瞬间会重新枚举 USB，
    * 第一次 claim 常常正好撞在枚举空窗期，所以失败要退避重试几次。
    */
-  async open({ attempts = 4, delayMs = 400 } = {}) {
+  async open({ attempts = 3, delayMs = 400 } = {}) {
     const d = this.device;
     let lastErr = null;
     let lastStep = 'open';
@@ -6040,36 +6064,44 @@ class HdcTransport {
       let step = 'open';
       try {
         if (!d.opened) { step = 'open'; await d.open(); }
-        step = 'selectConfiguration';
-        if (!d.configuration) {
-          const cfg = d.configurations && d.configurations[0];
-          if (!cfg) { throw new Error('设备没有配置'); }
-          await d.selectConfiguration(cfg.configurationValue);
-        }
+
+        // ★ 关键差异：libusb 从不调用 SET_CONFIGURATION（它直接用现有配置），
+        // 而 WebUSB 里我们过去总是先 selectConfiguration 才能枚举接口。
+        // SET_CONFIGURATION 会重置所有接口/端点，很可能让 daemon 的回包发送失败
+        // （真机日志里的 SendUSBRaw index failed）。
+        // 所以：**先尝试不选配置直接 claim**，失败再退回选配置。
         step = 'claim';
-        this.iface = findHdcInterface(d);
-        await d.claimInterface(this.iface.interfaceNumber);
+        this.iface = findHdcInterfaceFromConfigurations(d);
+        this.selectedConfig = false;
+        try {
+          await d.claimInterface(this.iface.interfaceNumber);
+          this.emit('INFO', `claim 成功（未调用 selectConfiguration）iface=${this.iface.interfaceNumber}`);
+        } catch (eClaimNoSel) {
+          if (!d.configuration) {
+            const cfg = d.configurations && d.configurations[0];
+            if (!cfg) { throw eClaimNoSel; }
+            await d.selectConfiguration(cfg.configurationValue);
+            this.selectedConfig = true;
+            this.emit('INFO', `回退：已 selectConfiguration(${cfg.configurationValue})，重新 claim`);
+            await d.claimInterface(this.iface.interfaceNumber);
+          } else {
+            throw eClaimNoSel;
+          }
+        }
         this.opened = true;
         return this.iface;
       } catch (e) {
         lastErr = e;
         lastStep = step;
         this.opened = false;
-        // 释放句柄，否则下一次一定失败（WebUSB 的 open 会独占设备）
         try { await d.close(); } catch { /* ignore */ }
         if (attempt < attempts) { await sleep$1(delayMs * attempt); }
       }
     }
-    // 第 7 轮实测：hdc server 常驻时 libusb_open 返回 -3 ACCESS，
-    // Chrome 表现为 open 这一步就失败。open 失败 = 被别的程序独占，
-    // 而不是"驱动不对"（真机 interface 0 的 Service 已确认是 WINUSB）。
     const where = lastStep === 'open'
       ? 'open 失败（设备被独占）'
-      : (lastStep === 'claim'
-        ? `claimInterface 失败（重试 ${attempts} 次）`
-        : `${lastStep} 失败`);
-    const desc =
-      where
+      : (lastStep === 'claim' ? `claimInterface 失败（重试 ${attempts} 次）` : `${lastStep} 失败`);
+    const desc = where
       + ` [class=0x${IFACE_CLASS.toString(16)} sub=0x${IFACE_SUBCLASS.toString(16)}`
       + ` proto=0x${IFACE_PROTOCOL.toString(16)}]`;
     const err = new Error(
@@ -6088,15 +6120,26 @@ class HdcTransport {
   async writeFrame({ sessionId, frame, option = OPT_HEADER }) {
     const head = buildUsbHead({ sessionId, dataSize: frame.length, option });
     this.emit('TX', `ub-head opt=${option} sid=0x${(sessionId >>> 0).toString(16).toUpperCase()} len=${frame.length}`);
-    const r1 = await this.device.transferOut(this.iface.endpointOut, head);
-    if (r1.status !== 'ok' || r1.bytesWritten !== head.length) {
-      throw new Error(`写 UB 头失败: ${r1.status} ${r1.bytesWritten}/${head.length}`);
-    }
+    await this.writeOut(head, 'UB 头');
     if (option === OPT_RESET) { this.emit('TX', 'reset(无帧)'); return; }   // RESET 只有头，没有帧
     this.emit('TX', `frame ${frame.length}B ${bytesToHexPreview(frame)}`);
-    const r2 = await this.device.transferOut(this.iface.endpointOut, frame);
-    if (r2.status !== 'ok' || r2.bytesWritten !== frame.length) {
-      throw new Error(`写帧失败: ${r2.status} ${r2.bytesWritten}/${frame.length}`);
+    await this.writeOut(frame, '帧');
+  }
+
+  /** 写 OUT；遇 STALL 先 clearHalt 再重试一次（设备被上次异常会话挂住时常见） */
+  async writeOut(data, label) {
+    for (let i = 0; i < 2; i++) {
+      try {
+        const r = await this.device.transferOut(this.iface.endpointOut, data);
+        if (r && r.status === 'ok' && r.bytesWritten === data.length) { return; }
+        throw new Error(`${r && r.status} ${r && r.bytesWritten}/${data.length}`);
+      } catch (e) {
+        if (i === 1) { throw new Error(`写${label}失败: ${(e && e.message) || e}`); }
+        this.emit('INFO', `写${label}失败(${(e && e.message) || e})，clearHalt 后重试`);
+        try { await this.device.clearHalt('out', this.iface.endpointOut); } catch { /* ignore */ }
+        try { await this.device.clearHalt('in', this.iface.endpointIn); } catch { /* ignore */ }
+        await sleep$1(120);
+      }
     }
   }
 
@@ -6461,7 +6504,7 @@ function bytesToHexPreview(bytes, n = 24) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r43';
+const BUILD_TAG = 'r44';
 
 const inject = ['slots', 'locale'];
 
