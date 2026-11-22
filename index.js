@@ -22,7 +22,7 @@
 const API_CHANNEL = '/api';
 const EP_PREFIX = 'mobile-bridge';
 const ROUTE_PREFIX = '/mbridge';
-const BROWSER_STALE_MS = 8000;
+const BROWSER_STALE_MS = 75000;
 
 export function apply(ctx) {
   /** id → { resolve, reject, timer } */
@@ -129,7 +129,8 @@ export function apply(ctx) {
           const needBrowser = () => {
             if (!browserAlive()) {
               throw new Error(
-                '浏览器端没有在轮询：请打开 DSH 页面并保持标签页在前台（移动设备那一栏不用打开）',
+                '浏览器端没有在轮询（超过 75 秒没收到心跳）：请把 DSH 标签页切到前台再试。'
+                + '后台标签页会被 Chrome 节流/冻结，这是浏览器行为，不是插件故障。',
               );
             }
             if (!device) {

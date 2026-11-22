@@ -6791,7 +6791,7 @@ function hexOf(bytes, limit = 256) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r66';
+const BUILD_TAG = 'r67';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -6848,6 +6848,7 @@ const STATE = {
   connectToken: 0,    // 每次连接自增；旧任务发现令牌变化即放弃
   connectInFlight: null,  // 串行化：同一时刻只允许一个连接流程
   hdcPending: null,   // 进行中的 HDC 会话（自动重连/手动连接都可能留下）
+  keepAlive: null,    // 后台保活句柄
   connection: null,   // 宿主 RPC 连接（用于把 HDC 日志送到宿主落盘）
 };
 
@@ -6864,6 +6865,29 @@ async function withConnectLock(fn) {
     if (STATE.connectInFlight === run) { STATE.connectInFlight = null; }
   });
   return run;
+}
+
+/**
+ * 后台保活：Chrome 会在标签页隐藏一段时间后冻结定时器，导致宿主桥停止轮询。
+ * 播放一段几乎无声的 AudioContext 可以显著延缓冻结（业界常用做法）。
+ * 必须在用户手势里首次调用。
+ */
+function startKeepAlive() {
+  if (STATE.keepAlive) { return; }
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) { return; }
+    const ctx = new Ctx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    gain.gain.value = 0.00005;          // 几乎无声
+    osc.frequency.value = 40;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    STATE.keepAlive = { ctx, osc };
+    pushHdcLog('INFO', '已启用后台保活（阻止标签页被冻结）');
+  } catch { /* 不支持就算了 */ }
 }
 
 /** 把 HDC 日志送到宿主写文件，便于直接读取而不必截屏。 */
@@ -7360,6 +7384,7 @@ function MobileBridgeSection(props) {
   async function runConnect() {
     setError('');
     setPhase('connecting');
+    startKeepAlive();
     // 作废上一次会话：避免它的重试循环继续往端点写旧 sid 的帧
     const token = ++STATE.connectToken;
     if (STATE.hdc) { try { STATE.hdc.abort('用户发起新连接'); } catch { /* ignore */ } STATE.hdc = null; }
