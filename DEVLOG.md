@@ -1084,3 +1084,27 @@ Must be handling a user gesture to show a permission request
 
 诊断按钮保持纯只读，但会报告每个设备 `opened` 状态——
 若为 true 即证实是浏览器自身残留句柄（r85 会清掉）。
+
+## 2026-11-22 21:12 - 真因确定：手机暴露的是 HID(0x6) 接口而非 HDC(0xff)
+
+**首次拿到真实 USB 数据（客户端上报到 ~/.dsh/usbstate.log）：**
+```json
+{"vid":"0x12d1","pid":"0x1101","serial":"...","opened":false,
+ "productName":"HDC Device","configuration":1,
+ "interfaces":[{"n":0,"cls":"0x6","claimed":false}]}
+```
+
+**结论（数据支撑，非猜测）：**
+- `opened:false` → 不是浏览器残留句柄（排除我之前几个版本的假设）
+- `interfaces[0].cls = 0x6` → 是 **HID 类**，而 HDC 需要 **0xff/0x50/0x01**
+- 只有一个接口，没有 vendor 接口
+
+**根因：手机的 USB 工作模式变了**（10MB 传输期间手机休眠/降级），
+当前只暴露 HID 接口 → 被 Windows 的 HID 驱动独占 → `device.open()` 必然 Access denied。
+**与我的连接代码无关。**
+
+**解决：手机上把「USB 连接方式」改为「传输文件」，重新暴露 HDC vendor 接口。**
+
+**同时改进（r88）：** 连接失败时分析接口 class，若不是 0xff，直接给出
+「手机 USB 接口不是 HDC 调试接口，请把 USB 连接方式改成传输文件」的精准提示，
+而不是笼统的 Access denied。

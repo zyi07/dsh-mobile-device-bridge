@@ -7040,7 +7040,7 @@ async function uninstallBundle(session, bundleName) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r87';
+const BUILD_TAG = 'r88';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -7183,6 +7183,15 @@ async function dumpUsbState(tag) {
       body: JSON.stringify(report),
     });
   } catch { /* ignore */ }
+
+  // 分析：是否有 HDC 的 vendor 接口(0xff)
+  const classes = [];
+  for (const d of report.devices) {
+    for (const i of (d.interfaces || [])) { classes.push(i.cls); }
+  }
+  report.classes = classes;
+  report.hasHdcIface = classes.indexOf('0xff') >= 0;
+  return report;
 }
 
 async function releaseStaleUsbHandles() {
@@ -7884,8 +7893,20 @@ function MobileBridgeSection(props) {
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
       // 失败时把 USB 真实状态写进日志（我在宿主侧直接读，无需用户复制）
-      try { await dumpUsbState('连接失败后'); } catch { /* ignore */ }
-      const hint = friendly(raw, t, kind);
+      let usbState = null;
+      try { usbState = await dumpUsbState('连接失败后'); } catch { /* ignore */ }
+      let hint = friendly(raw, t, kind);
+      // 精准诊断：设备在，但暴露的是 HID/其它接口，没有 HDC 的 0xff 接口
+      if (usbState && usbState.count > 0 && usbState.hasHdcIface === false) {
+        hint = '手机当前的 USB 接口不是 HDC 调试接口（现在暴露的是 class='
+          + (usbState.classes.join('/') || '?')
+          + '，HDC 需要 0xff）。\n\n解决办法（在手机上操作）：\n'
+          + '1) 解锁手机，下拉通知栏 → 点「USB 连接方式」→ 选「传输文件」\n'
+          + '   （或拔掉数据线重插，在手机弹出的选项里选「传输文件」）\n'
+          + '2) 确认「设置 → 系统 → 开发者选项 → USB 调试」是打开的\n'
+          + '3) 回到这里点「连接设备」\n\n'
+          + '如果下拉通知栏没有 USB 选项：换一根数据线（有些线只能充电）。';
+      }
       // 日志与原始错误在下面统一设置（并把日志复制到剪贴板）
       const logText = (STATE.log && STATE.log.length)
         ? STATE.log.join('\n')
@@ -7923,8 +7944,20 @@ function MobileBridgeSection(props) {
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
       // 失败时把 USB 真实状态写进日志（我在宿主侧直接读，无需用户复制）
-      try { await dumpUsbState('连接失败后'); } catch { /* ignore */ }
-      const hint = friendly(raw, t, kind);
+      let usbState = null;
+      try { usbState = await dumpUsbState('连接失败后'); } catch { /* ignore */ }
+      let hint = friendly(raw, t, kind);
+      // 精准诊断：设备在，但暴露的是 HID/其它接口，没有 HDC 的 0xff 接口
+      if (usbState && usbState.count > 0 && usbState.hasHdcIface === false) {
+        hint = '手机当前的 USB 接口不是 HDC 调试接口（现在暴露的是 class='
+          + (usbState.classes.join('/') || '?')
+          + '，HDC 需要 0xff）。\n\n解决办法（在手机上操作）：\n'
+          + '1) 解锁手机，下拉通知栏 → 点「USB 连接方式」→ 选「传输文件」\n'
+          + '   （或拔掉数据线重插，在手机弹出的选项里选「传输文件」）\n'
+          + '2) 确认「设置 → 系统 → 开发者选项 → USB 调试」是打开的\n'
+          + '3) 回到这里点「连接设备」\n\n'
+          + '如果下拉通知栏没有 USB 选项：换一根数据线（有些线只能充电）。';
+      }
       // 日志与原始错误在下面统一设置（并把日志复制到剪贴板）
       const logText = (STATE.log && STATE.log.length)
         ? STATE.log.join('\n')
