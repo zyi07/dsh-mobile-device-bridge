@@ -261,7 +261,8 @@ export function apply(ctx) {
 
           // ---- 华为账号登录（扫码）----
           if (path === ROUTE_PREFIX + '/agc/login/start' && req.method === 'POST') {
-            const r = await agcCommand('start', 180000);
+            // 用户主动点「开始登录」：强制重开，保证拿到的是全新二维码
+            const r = await agcCommand('start-force', 180000);
             send(res, 200, r);
             return;
           }

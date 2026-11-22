@@ -67,14 +67,14 @@ class LoginSession:
         self.need_code = False    # 是否需要短信验证码
         self._ticker_task = None
         self.phase = "waiting"    # waiting | scanned | expired（仅扫码模式）
+        self.qr_page_expired = False   # 截这张二维码时，页面上是否显示"已过期"
         self.loop = None
 
     async def start(self, mode="qr", force=False):
-        # 已有等待中的会话时直接复用，避免把用户正在扫的二维码弄失效
-        if (not force and self.page and self.state in ("waiting", "need_code", "need_captcha")):
+        # 只有"刚生成不到 25 秒"的会话才复用；否则重开，避免返回一张过期二维码
+        if (not force and self.page and self.state == "waiting"
+                and self.qr_b64 and (time.time() - self.qr_at) < 25):
             self.mode = mode
-            if not self.qr_b64:
-                await self._capture_qr()
             return
         self.mode = mode
         from playwright.async_api import async_playwright
@@ -320,6 +320,7 @@ class LoginSession:
                 await self.page.wait_for_timeout(1200)
                 png = await self.page.screenshot()          # 整页：用户也能看到「短信验证码登录」等其它入口
                 if not self._looks_blank(png):
+                    self.qr_page_expired = (await self._page_phase()) == "expired"
                     self.qr_b64 = base64.b64encode(self._crop_qr(png)).decode()
                     self.qr_at = time.time()
                     self.message = ""
@@ -347,6 +348,28 @@ class LoginSession:
         self.state = "success"
         self.message = message or "登录成功"
         self.account = ""
+
+    async def _click_refresh(self):
+        """点掉「二维码已过期」上的刷新按钮（实测按钮文案就是「刷新」）"""
+        for sel in ("text=刷新", "text=刷新二维码", "text=点击刷新",
+                    ".hwid-qrcode-refresh", "[class*='refresh']"):
+            try:
+                loc = self.page.locator(sel).first
+                if await loc.count() > 0 and await loc.is_visible():
+                    await loc.click(timeout=3000)
+                    await self.page.wait_for_timeout(1800)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _restart_browser(self):
+        """彻底重开浏览器并重新进登录页（保留 Cookie 无关紧要，登录本来就没成功）"""
+        try:
+            await self.close()
+        except Exception:
+            pass
+        await self.start(force=True)
 
     async def _page_phase(self):
         """读页面文案判断扫码阶段（实测文案：扫码成功 / 请在手机上确认 / 已失效）"""
@@ -394,18 +417,13 @@ class LoginSession:
         phase = await self._page_phase()
         self.phase = phase
         if phase == "expired":
-            # 过期后：先尝试点页面上的刷新，再重截
             if time.time() - self.qr_at > 3:
-                try:
-                    for sel in ("text=点击刷新", "text=刷新二维码", ".hwid-qrcode-refresh"):
-                        loc = self.page.locator(sel).first
-                        if await loc.count() > 0:
-                            await loc.click(timeout=3000)
-                            await self.page.wait_for_timeout(1500)
-                            break
-                except Exception:
-                    pass
+                await self._click_refresh()
                 await self._capture_qr()
+                # 点了刷新还是过期 → 整个会话重开（最可靠）
+                if await self._page_phase() == "expired":
+                    self.message = "二维码过期且刷新无效，正在重新打开登录页…"
+                    await self._restart_browser()
         elif time.time() - self.qr_at > QR_MAX_AGE:
             await self._capture_qr()
 
@@ -423,7 +441,8 @@ class LoginSession:
 
     def snapshot(self, with_qr=False):
         out = {"ok": True, "state": self.state, "message": self.message, "mode": self.mode,
-               "needCode": self.need_code, "phase": self.phase}
+               "needCode": self.need_code, "phase": self.phase,
+               "qrPageExpired": self.qr_page_expired}
         if self.page:
             out["url"] = self.page.url[:160]
         if with_qr and self.qr_b64:
@@ -473,6 +492,9 @@ async def main():
                 params = json.loads(arg or "{}")
                 await sess.submit_code(params.get("code", ""))
                 _emit(sess.snapshot(with_qr=False))
+            elif cmd == "start-force":
+                await sess.start(force=True)
+                _emit(sess.snapshot(with_qr=True))
             elif cmd == "start":
                 await sess.start()
                 _emit(sess.snapshot(with_qr=True))
