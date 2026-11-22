@@ -474,7 +474,8 @@ class LoginSession:
         if any(k in body for k in ("已失效", "已过期", "二维码已过期", "点击刷新",
                                    "刷新二维码", "失效", "过期")):
             return "expired"
-        if "扫码成功" in body or "请在手机上确认" in body or "已扫描" in body:
+        if any(k in body for k in ("扫码成功", "请在手机上确认", "已扫描",
+                                   "请在手机", "确认登录", "已扫码")):
             return "scanned"
         return "waiting"
 
@@ -509,6 +510,11 @@ class LoginSession:
         # 阶段判定：让用户知道"已扫码，在手机上确认"
         phase = await self._page_phase()
         self.phase = phase
+        if phase == "scanned":
+            # 已经扫上了：绝不再刷新二维码，也不做过期处理，
+            # 否则会把"等待手机确认"的画面覆盖成一张新二维码（用户看到"又让我扫码"）
+            self.message = "已扫码，请在手机上确认登录"
+            return
         if phase == "expired":
             if time.time() - self.qr_at > 3:
                 await self._click_refresh()
@@ -538,7 +544,7 @@ class LoginSession:
                "qrPageExpired": self.qr_page_expired}
         if self.page:
             out["url"] = self.page.url[:160]
-        if with_qr and self.qr_b64:
+        if with_qr and self.qr_b64 and self.state != "success":
             out["qr"] = self.qr_b64
             age = int(time.time() - self.qr_at)
             out["qrAge"] = age

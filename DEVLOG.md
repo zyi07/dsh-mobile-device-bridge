@@ -931,3 +931,33 @@ Cookie 仍然自动抓取，后续 AGC 自动化不受影响。
 
 **实测：** 连续点 3 次「开始登录」，三次都是 580×580、深色占比 ≈48%、
 `qrPageExpired=False` 的干净二维码。
+
+## 2026-11-22 20:10 - 扫码登录成功！ID 签名可行性已验证
+
+**用户实测：** 扫码登录成功，登录态已保存（34 条 Cookie，含 x-hd-csrf）。
+
+**修掉的 bug（用户指出）：** 扫码后闪回"请扫码"。
+原因：`poll()` 在 `phase == 'scanned'` 时仍会因 `qrAge` 超时重截二维码，
+把"等待手机确认"的画面覆盖成一张新码。
+修复：`scanned` 分支直接 return，不再刷新二维码；成功后也不再返回 qr 字段。
+新增回归测试第 5b 项。
+
+**ID 签名可行性 —— 首次用真实账号验证通过（关键证据）：**
+调用方式：**在 Playwright context 内用 `context.request`**（共享浏览器 Cookie、
+不受 CORS 限制、WAF 指纹正常），外部 urllib 会 403。
+
+| 接口 | 结果 |
+|---|---|
+| `user-team-list` | 200，团队 `<TEAM_ID>`（<ACCOUNT_NAME>） |
+| `getUserInfo` | 200，「<ACCOUNT_NICK>」 |
+| `projectList` | 200，2 个项目 |
+| `app/list` | 200，2 个应用（`com.zyiii.noteoh` / `com.zhangyi.bankstatement`） |
+| `device/list` | 200，**4 台设备，含本机 `HoKit_<UDID_PREFIX>`（<DEVICE_UDID>）id=<CLOUD_DEVICE_ID>** |
+| `cert/list` | 200，4 张证书，含调试证书 `hokit_debug`、`auto_debug_…` |
+| `provision/list` | 200，有 `com.zyiii.noteoh` 的发布 Profile |
+
+**结论：设备早已注册、调试证书已有、接口全通 → ID 签名条件齐全，可行。**
+
+**卡点（如实说明）：** 用**我们自己的新 CSR** 申请证书这一步，需要本地生成
+密钥库文件（`.jks`/`.p12`），被本机安全策略拦截（`secret.ext.jks`），
+不能在 shell 里做。需在**插件运行时（Node 子进程）**完成——这也是最终形态该有的位置。

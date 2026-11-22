@@ -111,6 +111,17 @@ async def main():
         print(f"5. is_on_agc({url[:52]}…) = {got} 期望 {want}  {'✓' if cond else '✗'}")
         ok = ok and cond
 
+    # 5b) 已扫码阶段不得再刷新二维码（否则前端会闪回"请扫码"）
+    s = make_session(
+        "https://id7.cloud.huawei.com/CAS/portal/loginAuth.html",
+        text="扫码成功，请在手机上确认登录")
+    s.qr_at = time.time() - 300      # 二维码很旧了，正常情况下会触发重截
+    before = s.qr_b64
+    await s.poll()
+    cond = s.phase == "scanned" and s.qr_b64 == before and s.state == "waiting"
+    print(f"5b. 已扫码 + 二维码已旧 → phase={s.phase} 未换图={'是' if s.qr_b64==before else '否'}  {'✓' if cond else '✗'}")
+    ok = ok and cond
+
     # 6) 深色像素判据（防止再出现"白板当二维码"）
     try:
         from PIL import Image
