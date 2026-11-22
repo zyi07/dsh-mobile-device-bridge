@@ -53,6 +53,25 @@ export function shellQuote(p) {
 }
 
 /**
+ * 写入**单块**到指定偏移（幂等）。用于分片上传：每次 HTTP 请求只带一块，
+ * 避免超大请求体，也便于断点重传。
+ * @param chunkSize 块大小（必须与 offset 对齐方式一致）
+ * @param index 块序号，offset = index * chunkSize
+ */
+export async function writeChunkAt(session, remotePath, chunkBytes, chunkSize, index, opts = {}) {
+  const { log } = opts;
+  const path = shellQuote(remotePath);
+  const b64 = bytesToBase64(chunkBytes);
+  const cmd = `echo -n '${b64}' | base64 -d | dd of=${path} bs=${chunkSize} seek=${index} conv=notrunc status=none`;
+  if (cmd.length > 120 * 1024) {
+    throw new Error(`内部错误：单块命令 ${cmd.length} 字符，超过实测上限 128KiB`);
+  }
+  await session.shell(cmd, { timeoutMs: 60000, attempts: 2, retryOnEmpty: false });
+  if (log) { log(`写入第 ${index} 块（${chunkBytes.length} 字节 @ ${index * chunkSize}）`); }
+  return { bytes: chunkBytes.length };
+}
+
+/**
  * 写入文件到设备。
  * @param session HdcSession
  * @param remotePath 远端绝对路径（需 shell 可写，实测 /data/local/tmp 可用）

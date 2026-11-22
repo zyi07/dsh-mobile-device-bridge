@@ -4,10 +4,10 @@ import { AdbDaemonWebUsbDeviceManager } from '@yume-chan/adb-daemon-webusb';
 import AdbWebCredentialStore from '@yume-chan/adb-credential-web';
 import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
 import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } from './hdc/session.js';
-import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote } from './hdc/files.js';
+import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChunkAt } from './hdc/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r69';
+const BUILD_TAG = 'r70';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -489,6 +489,11 @@ async function runJob(job) {
       const log = (m) => pushHdcLog('INFO', m);
       if (job.kind === 'push') {
         const bytes = fromBase64(job.data.base64);
+        // 分片模式：只写这一块（幂等，写到精确偏移）
+        if (typeof job.data.index === 'number' && job.data.chunkSize) {
+          const r = await writeChunkAt(STATE.hdc, job.data.path, bytes, job.data.chunkSize, job.data.index, { log });
+          return { ok: true, bytes: r.bytes, chunk: job.data.index };
+        }
         log(`开始上传 ${bytes.length} 字节 → ${job.data.path}`);
         const r = await pushFile(STATE.hdc, job.data.path, bytes, { log });
         if (stale()) { return { ok: false, error: '连接已切换，任务作废' }; }

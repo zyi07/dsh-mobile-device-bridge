@@ -158,8 +158,16 @@ export function apply(ctx) {
             }
             needBrowser();
             const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 600000, 1000), 1800000);
-            const r = await enqueue('push', { path: String(body.path), base64: String(body.base64) }, timeoutMs);
-            send(res, 200, { ok: true, device, bytes: r.bytes, chunks: r.chunks });
+            // 支持分片上传：index/chunkSize 存在时只写这一块（幂等，写到精确偏移）
+            const payload = { path: String(body.path), base64: String(body.base64) };
+            if (typeof body.index === 'number' && body.chunkSize) {
+              payload.index = body.index;
+              payload.chunkSize = Number(body.chunkSize);
+            }
+            const r = await enqueue('push', payload, timeoutMs);
+            send(res, 200, {
+              ok: true, device, bytes: r.bytes, chunks: r.chunks, chunk: r.chunk,
+            });
             return;
           }
 

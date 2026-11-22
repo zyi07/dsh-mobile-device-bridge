@@ -738,3 +738,22 @@ INFO ← 通道关闭 side=device  ← 我把它当成了本次命令的结束 �
 `runJob` 遇到 USB 级错误先自愈再重试一次同一任务。
 
 构建标记 r69
+
+## 2026-11-22 13:25 - 512KB 往返闭环成功；1MB 改走分片上传
+
+**实测结果（修复后）：**
+| 操作 | 大小 | 耗时 | 校验 |
+|---|---|---|---|
+| push | 512KB（8 块） | 4.6s | sha256 一致 ✅ |
+| pull | 512KB | 2.8s | sha256 一致 ✅（三方同值） |
+→ 吞吐约 push 113KB/s、pull 187KB/s
+
+**新问题：** 1MB 文件 base64 后 1.4MB，超过宿主 `readBody` 默认 1MiB →
+HTTP 100 后直接断开。虽然已把 push/install 上限放宽到 128MiB，但宿主重载不可靠。
+
+**改为分片上传（更稳的架构）：**
+- `files.js` 新增 `writeChunkAt()`：单块写到精确偏移（`dd bs=<chunkSize> seek=<index> conv=notrunc`）
+- 客户端 push 任务支持 `{index, chunkSize}` 分片模式
+- 宿主 `/mbridge/push` 透传 `index`/`chunkSize`
+- 好处：单个 HTTP 请求体恒定很小、无大内存峰值、天然可断点重传
+- 构建标记 r70
