@@ -7,7 +7,7 @@ import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } f
 import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChunkAt } from './hdc/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r85';
+const BUILD_TAG = 'r87';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -121,6 +121,41 @@ function startKeepAlive() {
  *
  * 所以连接前，把所有 getDevices() 里 opened=true 的设备强制 close 一遍。
  */
+/** 把当前 WebUSB 的真实状态写进宿主日志，便于在不依赖用户复制的情况下定位问题 */
+async function dumpUsbState(tag) {
+  if (typeof navigator === 'undefined' || !navigator.usb) { return; }
+  const report = { tag, at: new Date().toISOString(), devices: [], error: null };
+  try {
+    const list = await navigator.usb.getDevices();
+    report.count = list.length;
+    for (const d of list) {
+      report.devices.push({
+        vid: '0x' + d.vendorId.toString(16),
+        pid: '0x' + d.productId.toString(16),
+        serial: d.serialNumber || '',
+        opened: !!d.opened,
+        productName: d.productName || '',
+        configuration: d.configuration ? d.configuration.configurationValue : null,
+        interfaces: d.configuration
+          ? d.configuration.interfaces.map((i) => ({
+              n: i.interfaceNumber,
+              cls: '0x' + i.alternate.interfaceClass.toString(16),
+              claimed: !!i.claimed,
+            }))
+          : null,
+      });
+    }
+  } catch (e) { report.error = String((e && e.message) || e); }
+  // 直接 POST 到宿主（同源），宿主机写 ~/.dsh/usbstate.log
+  try {
+    await fetch('/mbridge/agc/usbstate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(report),
+    });
+  } catch { /* ignore */ }
+}
+
 async function releaseStaleUsbHandles() {
   if (typeof navigator === 'undefined' || !navigator.usb) { return 0; }
   let n = 0;
@@ -913,6 +948,8 @@ function MobileBridgeSection(props) {
       setPhase('connected');
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
+      // 失败时把 USB 真实状态写进日志（我在宿主侧直接读，无需用户复制）
+      try { await dumpUsbState('连接失败后'); } catch { /* ignore */ }
       const hint = friendly(raw, t, kind);
       // 日志与原始错误在下面统一设置（并把日志复制到剪贴板）
       const logText = (STATE.log && STATE.log.length)
@@ -950,6 +987,8 @@ function MobileBridgeSection(props) {
       setOut(text);
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
+      // 失败时把 USB 真实状态写进日志（我在宿主侧直接读，无需用户复制）
+      try { await dumpUsbState('连接失败后'); } catch { /* ignore */ }
       const hint = friendly(raw, t, kind);
       // 日志与原始错误在下面统一设置（并把日志复制到剪贴板）
       const logText = (STATE.log && STATE.log.length)
@@ -1031,6 +1070,7 @@ function MobileBridgeSection(props) {
         onClick: async () => {
           setError('');
           try {
+            await dumpUsbState('诊断按钮');
             const d = await diagnoseUsb();
             setOut('USB 诊断：\n' + JSON.stringify(d, null, 2));
           } catch (e) {

@@ -294,6 +294,20 @@ export function apply(ctx) {
             return;
           }
           // 浏览器扩展把本机浏览器的 AGC 登录态发过来（用户在自己浏览器原生登录）
+          // 浏览器把 WebUSB 真实状态上报到宿主（写文件，便于服务端直接读）
+          if (path === ROUTE_PREFIX + '/agc/usbstate' && req.method === 'POST') {
+            const body = await readBody(req, 1 << 20);
+            const fs = await import('node:fs/promises');
+            const file = nodePath.join(nodeOs.homedir(), '.dsh', 'usbstate.log');
+            try {
+              await fs.mkdir(nodePath.dirname(file), { recursive: true });
+              const line = `[${new Date().toISOString()}] ${JSON.stringify(body)}\n`;
+              await fs.appendFile(file, line);
+            } catch { /* ignore */ }
+            send(res, 200, { ok: true });
+            return;
+          }
+
           // 提供已签名 HAP 下载（用本机 hdc 安装，绕开 WebUSB 抢设备）
           if (path === ROUTE_PREFIX + '/agc/hap' && req.method === 'GET') {
             const fs = await import('node:fs/promises');
