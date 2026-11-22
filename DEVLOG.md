@@ -1007,3 +1007,22 @@ Cookie 仍然自动抓取，后续 AGC 自动化不受影响。
 **提示文案更新（r79）：** 按可能性排序——①Chrome 自身占用（完全退出 Chrome）
 ②DevEco Studio（结束 devecostudio64.exe/idea64.exe/hdc.exe）
 ③物理拔插；并给出 PowerShell 查占用命令。
+
+## 2026-11-22 20:48 - 修设备句柄泄漏（Access denied 的真因之一）
+
+**用户实测：** PowerShell 显示**没有** hdc/deveco/idea/hisuite 进程，只有 24 个 `msedge`
+（用户用 Edge 浏览）。即外部并没有 hdc 占用，但 open 仍 Access denied。
+
+**找到真 bug（`transport.js::close`）：**
+```js
+async close() {
+  if (!this.opened) { return; }   // ← 致命
+```
+`open()` 的流程是「先 device.open()，再 claimInterface」。若 **open 成功但 claim 失败**，
+`this.opened` 仍是 false，于是 `close()` 直接 return —— **device 句柄没被关闭**。
+r80 加入的 3 次自动重试 + 挂载自动重连会不断累积泄漏，
+最终 WebUSB 对该设备永久报 `Access denied`。
+
+**修复（r81）：** 无论 `opened` 与否，只要 `device.opened` 为真就 `releaseInterface` + `close`。
+
+**但已泄漏的句柄代码修不了**：必须**物理拔插 USB**（或重启承载 DSH 的进程）才能重置。

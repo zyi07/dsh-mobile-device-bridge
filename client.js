@@ -6400,10 +6400,19 @@ class HdcTransport {
   }
 
   async close() {
-    if (!this.opened) { return; }
-    try { await this.device.releaseInterface(this.iface.interfaceNumber); } catch { /* ignore */ }
-    try { await this.device.close(); } catch { /* ignore */ }
+    // 注意：不能因为 this.opened 为 false 就直接返回。
+    // open() 可能已经打开了 device（device.opened=true），但 claim 失败后 this.opened 仍是 false；
+    // 这时若直接 return，device 句柄就泄漏了 —— 泄漏几次之后 WebUSB 会永久报 Access denied。
+    try {
+      if (this.iface && this.device) {
+        await this.device.releaseInterface(this.iface.interfaceNumber);
+      }
+    } catch { /* ignore */ }
+    try {
+      if (this.device && this.device.opened) { await this.device.close(); }
+    } catch { /* ignore */ }
     this.opened = false;
+    this.iface = null;
   }
 }
 
@@ -7050,7 +7059,7 @@ async function uninstallBundle(session, bundleName) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r80';
+const BUILD_TAG = 'r81';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';

@@ -375,10 +375,19 @@ export class HdcTransport {
   }
 
   async close() {
-    if (!this.opened) { return; }
-    try { await this.device.releaseInterface(this.iface.interfaceNumber); } catch { /* ignore */ }
-    try { await this.device.close(); } catch { /* ignore */ }
+    // 注意：不能因为 this.opened 为 false 就直接返回。
+    // open() 可能已经打开了 device（device.opened=true），但 claim 失败后 this.opened 仍是 false；
+    // 这时若直接 return，device 句柄就泄漏了 —— 泄漏几次之后 WebUSB 会永久报 Access denied。
+    try {
+      if (this.iface && this.device) {
+        await this.device.releaseInterface(this.iface.interfaceNumber);
+      }
+    } catch { /* ignore */ }
+    try {
+      if (this.device && this.device.opened) { await this.device.close(); }
+    } catch { /* ignore */ }
     this.opened = false;
+    this.iface = null;
   }
 }
 
