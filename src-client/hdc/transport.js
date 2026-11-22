@@ -707,7 +707,12 @@ export async function diagnoseUsb() {
     return { ok: false, error: '当前浏览器没有 WebUSB' };
   }
   let devices;
-  try { devices = await navigator.usb.getDevices(); } catch (e) {
+  try {
+    devices = await Promise.race([
+      navigator.usb.getDevices(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('getDevices 超时 5s')), 5000)),
+    ]);
+  } catch (e) {
     return { ok: false, error: 'getDevices 失败: ' + (e && e.message) };
   }
   const out = [];
@@ -734,8 +739,7 @@ export async function diagnoseUsb() {
           })
         : null,
     };
-    // 现场试一次 claim：这是判断"环境问题 vs 我们代码问题"的决定性证据
-    entry.claimTest = await probeClaim(d);
+    // 诊断只读：绝不在这里 open/claim —— 那会卡在 Access denied 上，还会再泄漏句柄
     out.push(entry);
   }
   return { ok: true, count: devices.length, devices: out };

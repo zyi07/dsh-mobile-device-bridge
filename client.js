@@ -6732,7 +6732,12 @@ async function diagnoseUsb() {
     return { ok: false, error: '当前浏览器没有 WebUSB' };
   }
   let devices;
-  try { devices = await navigator.usb.getDevices(); } catch (e) {
+  try {
+    devices = await Promise.race([
+      navigator.usb.getDevices(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('getDevices 超时 5s')), 5000)),
+    ]);
+  } catch (e) {
     return { ok: false, error: 'getDevices 失败: ' + (e && e.message) };
   }
   const out = [];
@@ -6759,34 +6764,10 @@ async function diagnoseUsb() {
           })
         : null,
     };
-    // 现场试一次 claim：这是判断"环境问题 vs 我们代码问题"的决定性证据
-    entry.claimTest = await probeClaim(d);
+    // 诊断只读：绝不在这里 open/claim —— 那会卡在 Access denied 上，还会再泄漏句柄
     out.push(entry);
   }
   return { ok: true, count: devices.length, devices: out };
-}
-
-/** 打开→选配置→尝试 claim→释放→关闭；只报告结论，不改设备状态。 */
-async function probeClaim(device) {
-  let openedHere = false;
-  let claimed = false;
-  let target = null;
-  try {
-    if (!device.opened) { await device.open(); openedHere = true; }
-    if (!device.configuration) {
-      const cfg = device.configurations && device.configurations[0];
-      if (cfg) { await device.selectConfiguration(cfg.configurationValue); }
-    }
-    target = findHdcInterface(device);
-    await device.claimInterface(target.interfaceNumber);
-    claimed = true;
-    return 'ok';
-  } catch (e) {
-    return `${(e && e.name) || 'Error'}: ${(e && e.message) || e}`;
-  } finally {
-    if (claimed) { try { await device.releaseInterface(target.interfaceNumber); } catch { /* ignore */ } }
-    if (openedHere) { try { await device.close(); } catch { /* ignore */ } }
-  }
 }
 
 
@@ -7059,7 +7040,7 @@ async function uninstallBundle(session, bundleName) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r81';
+const BUILD_TAG = 'r82';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
