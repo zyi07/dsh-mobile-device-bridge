@@ -7040,7 +7040,7 @@ async function uninstallBundle(session, bundleName) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r90';
+const BUILD_TAG = 'r91';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -7769,27 +7769,28 @@ function startBridge(connection) {
 const CSS = `
 .mb-root { display: flex; flex-direction: column; gap: 14px; font-size: 13px; }
 .mb-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.mb-btn {
-  padding: 7px 14px; border-radius: 8px;
-  border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.45));
-  background: var(--dsw-alias-fill-l2, rgba(127,127,127,.16));
-  color: var(--dsw-alias-label-primary, inherit);
-  font-size: 13px; cursor: pointer; font-family: inherit;
+/* 用 !important 压掉宿主全局 button 样式：否则 disabled 时会被改成白底白字 */
+.mb-root .mb-btn {
+  padding: 7px 14px !important; border-radius: 8px !important;
+  border: 1px solid rgba(127,127,127,.45) !important;
+  background: rgba(127,127,127,.18) !important;
+  color: inherit !important;
+  font-size: 13px !important; cursor: pointer !important; font-family: inherit !important;
+  line-height: 1.5 !important;
 }
-.mb-btn:hover:not(:disabled) { border-color: var(--dsw-alias-brand-primary, #3b82f6); }
-/* disabled 时必须显式给背景与颜色：否则浏览器默认样式会变成白底白字 */
-.mb-btn:disabled {
-  opacity: .5; cursor: not-allowed;
-  background: var(--dsw-alias-fill-l2, rgba(127,127,127,.16));
-  color: var(--dsw-alias-label-primary, inherit);
+.mb-root .mb-btn:hover:not(:disabled) { border-color: #3b82f6 !important; }
+.mb-root .mb-btn:disabled {
+  opacity: 1 !important; cursor: not-allowed !important;
+  background: rgba(127,127,127,.10) !important;
+  color: rgba(127,127,127,.95) !important;
 }
-.mb-btn--primary {
-  background: var(--dsw-alias-brand-primary, #3b82f6);
-  color: #fff; border-color: transparent;
+.mb-root .mb-btn--primary {
+  background: #3b82f6 !important; color: #fff !important;
+  border-color: transparent !important;
 }
-.mb-btn--primary:disabled {
-  background: var(--dsw-alias-brand-primary, #3b82f6);
-  color: #fff; opacity: .5;
+.mb-root .mb-btn--primary:disabled {
+  background: rgba(59,130,246,.55) !important;
+  color: #fff !important;
 }
 .mb-card {
   border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35)); border-radius: 10px;

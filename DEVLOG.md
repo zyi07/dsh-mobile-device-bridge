@@ -1179,3 +1179,19 @@ Must be handling a user gesture to show a permission request
 - 已登录时按钮后带 ✓ 标记
 
 构建 r90
+
+## 2026-11-23 00:00 - 按钮配色最终修复并用渲染验证（r91）
+
+**用户第二次反馈按钮仍看不清**（截图是 r90）。
+
+**根因：** 宿主有全局 `button` 样式，我的 `.mb-btn` 规则被压掉；
+`disabled` 时背景变白、文字继承浅色 → 白底白字。r90 只是加了 fallback，权重不够。
+
+**修复（r91）：**
+- 所有规则改为 `.mb-root .mb-btn` 前缀 + **`!important`**（权重 0,2,0，压过宿主全局）
+- **去掉 `opacity`**（透明度会让字更糊）
+- disabled 显式配色：`background: rgba(127,127,127,.10)`、`color: rgba(127,127,127,.95)`
+- primary disabled：`background: rgba(59,130,246,.55)`、白字
+
+**验证方式（不再让用户反复试）：** 用 Playwright 把 CSS 抽出来渲成静态页，
+分别在深色/浅色背景下截图 —— 六种按钮（普通/primary/disabled）全部清晰可读。
