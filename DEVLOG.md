@@ -1067,3 +1067,20 @@ Must be handling a user gesture to show a permission request
 - 实测：下载路由 200，10,339,245 字节，sha256 与源文件一致。
 
 构建 r84
+
+## 2026-11-22 21:10 - WebUSB 连接前释放残留句柄（r85）——针对 Access denied 的实质修复
+
+**用户批评正确：** 插件核心就是 WebUSB+HDC，不该放弃。
+
+**我能修、之前一直没做的：** WebUSB 的 device 句柄挂在浏览器进程里。
+上一次连接（尤其 10MB 传输超时）如果没执行 `device.close()`，**页面销毁也不会自动关**，
+句柄一直 open，之后每次 `open()` 都 `Access denied`。
+
+**修复（r85）：**
+1. 新增 `releaseStaleUsbHandles()`：连接前遍历 `navigator.usb.getDevices()`，
+   把所有 `opened === true` 的设备强制 `close()`；
+2. `runConnect` 在 `connectHarmony` 之前调用它；
+3. `beforeunload` / `pagehide` 时尽力关闭设备，避免下次留下悬挂句柄。
+
+诊断按钮保持纯只读，但会报告每个设备 `opened` 状态——
+若为 true 即证实是浏览器自身残留句柄（r85 会清掉）。

@@ -7040,7 +7040,7 @@ async function uninstallBundle(session, bundleName) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r84';
+const BUILD_TAG = 'r85';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -7139,6 +7139,35 @@ function startKeepAlive() {
     STATE.keepAlive = { ctx, osc };
     pushHdcLog('INFO', '已启用后台保活（阻止标签页被冻结）');
   } catch { /* 不支持就算了 */ }
+}
+
+/**
+ * 释放残留的设备句柄。
+ *
+ * WebUSB 的 device 句柄挂在浏览器进程里。上一次连接（尤其是大文件传输超时）
+ * 如果没走到 device.close()，页面销毁也不会自动关，句柄就一直 open，
+ * 之后每次 open() 都报 Access denied —— 这就是反复连不上的真正原因。
+ *
+ * 所以连接前，把所有 getDevices() 里 opened=true 的设备强制 close 一遍。
+ */
+async function releaseStaleUsbHandles() {
+  if (typeof navigator === 'undefined' || !navigator.usb) { return 0; }
+  let n = 0;
+  try {
+    const list = await navigator.usb.getDevices();
+    for (const d of list) {
+      if (d.opened) {
+        try {
+          await d.close();
+          n += 1;
+          pushHdcLog('INFO', `已释放残留的设备句柄 ${d.serialNumber || ''}`);
+        } catch (e) {
+          pushHdcLog('INFO', `释放残留句柄失败：${(e && e.message) || e}`);
+        }
+      }
+    }
+  } catch { /* ignore */ }
+  return n;
 }
 
 /**
@@ -7739,6 +7768,24 @@ function MobileBridgeSection(props) {
     return () => { clearInterval(id); if (STATE.notify) { STATE.notify = null; } };
   }, []);
 
+  // 页面卸载时尽力关闭 USB 设备，避免句柄悬挂在浏览器进程里（下次连接会 Access denied）
+  React.useEffect(() => {
+    const onUnload = () => {
+      try { if (STATE.hdc) STATE.hdc.close(); } catch { /* 同步尽力而为 */ }
+      try {
+        navigator.usb.getDevices().then((list) => {
+          for (const d of list) { if (d.opened) { try { d.close(); } catch { /* ignore */ } } }
+        }).catch(() => {});
+      } catch { /* ignore */ }
+    };
+    window.addEventListener('beforeunload', onUnload);
+    window.addEventListener('pagehide', onUnload);
+    return () => {
+      window.removeEventListener('beforeunload', onUnload);
+      window.removeEventListener('pagehide', onUnload);
+    };
+  }, []);
+
   // 挂载时不做任何自动重连：曾经的后台自动重连会和用户点击抢锁、
   // 让 requestDevice 失去用户手势，是 Access denied / gesture 报错的根源之一。
 
@@ -7783,6 +7830,8 @@ function MobileBridgeSection(props) {
     try {
       if (kind === 'hdc') {
         if (STATE.adb || STATE.hdc) { await detach(); }
+        // 先清掉浏览器里残留的句柄，否则 open 会一直 Access denied
+        await releaseStaleUsbHandles();
         const next = await connectHarmony(device, token);
         await flushHdcLog();
         setInfo(next);
