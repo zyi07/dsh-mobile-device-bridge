@@ -7,7 +7,7 @@ import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } f
 import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChunkAt } from './hdc/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r82';
+const BUILD_TAG = 'r83';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -804,69 +804,49 @@ function MobileBridgeSection(props) {
     return () => { clearInterval(id); if (STATE.notify) { STATE.notify = null; } };
   }, []);
 
-  // 挂载时：若模块里已有连接就复用；否则尝试静默重连（不需要用户手势，
-  // 之前授权过的设备可以用 getDevices() 取到）。
-  React.useEffect(() => {
-    let alive = true;
-    (async () => {
-      if (STATE.adb || STATE.hdc) { return; }
-      const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
-      if (!manager) { return; }
-      setPhase('reconnecting');
-      try {
-        const token = STATE.connectToken;
-        const devices = await manager.getDevices();
-        if (devices.length > 0 && !STATE.pending && STATE.connectToken === token) {
-          STATE.pending = attach(devices[0]).finally(() => { STATE.pending = null; });
-          const next = await STATE.pending;
-          if (STATE.connectToken !== token) { await detach(); return; }   // 用户已手动连接
-          if (alive) { setInfo(next); setPhase('connected'); return; }
-        }
-      } catch { /* 静默失败：交回手动连接 */ }
+  // 挂载时不做任何自动重连：曾经的后台自动重连会和用户点击抢锁、
+  // 让 requestDevice 失去用户手势，是 Access denied / gesture 报错的根源之一。
 
-      // ADB 没连上时再试 HDC：之前授权过的设备可以用 getDevices() 直接拿到，
-      // 密钥已保存在浏览器里，所以重连通常不需要再上机确认。
-      try {
-        if (typeof navigator !== 'undefined' && navigator.usb) {
-          const granted = await navigator.usb.getDevices();
-          const dev = granted.find((d) => d.vendorId === 0x12d1);
-          if (dev && !STATE.hdc && !STATE.adb) {
-            pushHdcLog('INFO', '检测到已授权的鸿蒙设备，尝试自动重连');
-            const next = await withConnectLock(async () => {
-              const token = ++STATE.connectToken;
-              return connectHarmony(dev, token);
-            });
-            if (STATE.connectToken !== token) { await detach(); return; }
-            if (alive) { setInfo(next); setKind('hdc'); setCmd('param get const.product.model'); setPhase('connected'); return; }
-          }
-        }
-      } catch (e) {
-        pushHdcLog('INFO', `HDC 自动重连未成功：${(e && e.message) || e}`);
-      }
-
-      if (alive) { setPhase('idle'); }
-    })();
-    return () => { alive = false; };  // 注意：这里不再断开连接
-  }, []);
-
+  // ★★ 关键：requestDevice 必须在用户点击的同一个调用栈里**立刻**调用。
+  //     绝不能先 await（包括等连接锁），否则浏览器判定"没有用户手势"，
+  //     报 Must be handling a user gesture。这就是之前一直连不上的真正原因。
   async function connect() {
-    return withConnectLock(runConnect);
-  }
-
-  async function runConnect() {
     setError('');
+    let picked = null;
+    if (kind === 'hdc') {
+      if (typeof navigator === 'undefined' || !navigator.usb) { setError(t('noWebusb')); return; }
+      try {
+        picked = await navigator.usb.requestDevice({ filters: [{ vendorId: 0x12d1 }] });
+      } catch (e) {
+        if (!e || e.name !== 'NotFoundError') {
+          setError('选择设备失败：' + (e && e.message ? e.message : e));
+        }
+        return;
+      }
+    } else {
+      const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
+      if (!manager) { setError(t('noWebusb')); return; }
+      try {
+        picked = await manager.requestDevice();
+      } catch (e) {
+        setError('选择设备失败：' + (e && e.message ? e.message : e));
+        return;
+      }
+    }
+    if (!picked) { setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle'); return; }
+
     setPhase('connecting');
     startKeepAlive();
+    return withConnectLock(() => runConnect(picked));
+  }
+
+  async function runConnect(device) {
     // 作废上一次会话：避免它的重试循环继续往端点写旧 sid 的帧
     const token = ++STATE.connectToken;
     if (STATE.hdc) { try { STATE.hdc.abort('用户发起新连接'); } catch { /* ignore */ } STATE.hdc = null; }
     STATE.info = null;
     try {
       if (kind === 'hdc') {
-        // HarmonyOS：直接用 WebUSB 选设备（华为 VID），再走 HDC 协议
-        if (typeof navigator === 'undefined' || !navigator.usb) { throw new Error(t('noWebusb')); }
-        const device = await navigator.usb.requestDevice({ filters: [{ vendorId: 0x12d1 }] });
-        if (!device) { setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle'); return; }
         if (STATE.adb || STATE.hdc) { await detach(); }
         const next = await connectHarmony(device, token);
         await flushHdcLog();
@@ -875,11 +855,7 @@ function MobileBridgeSection(props) {
         setPhase('connected');
         return;
       }
-      const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
-      if (!manager) { throw new Error(t('noWebusb')); }
-      const device = await manager.requestDevice();
       if (STATE.connectToken !== token) { return; }        // 期间已发起新连接
-      if (!device) { setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle'); return; }
       if (STATE.adb || STATE.hdc) { await detach(); }
       const next = await attach(device);
       if (STATE.connectToken !== token) { await detach(); return; }   // 连接被取代

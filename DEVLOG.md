@@ -1026,3 +1026,27 @@ r80 加入的 3 次自动重试 + 挂载自动重连会不断累积泄漏，
 **修复（r81）：** 无论 `opened` 与否，只要 `device.opened` 为真就 `releaseInterface` + `close`。
 
 **但已泄漏的句柄代码修不了**：必须**物理拔插 USB**（或重启承载 DSH 的进程）才能重置。
+
+## 2026-11-22 21:00 - 真正的连接失败根因：requestDevice 丢失用户手势（r83）
+
+**决定性线索（用户第三次截图）：**
+```
+Failed to execute 'requestDevice' on 'USB':
+Must be handling a user gesture to show a permission request
+```
+
+**根因（两个，都在我这边）：**
+1. `connect()` 第一行就是 `withConnectLock(runConnect)`，而 `withConnectLock` 内部
+   会 `await` 排队（等正在跑的自动重连）。**等完之后浏览器判定"没有用户手势"**，
+   于是 `requestDevice` 直接失败 → 表现为连不上 / Access denied。
+2. 挂载时还有一段**自动重连 useEffect**（44 行），它在后台跑，
+   既是 in-flight 锁的竞争者，也会自己 open 设备制造 Access denied。
+
+**修复：**
+- `connect()` 重写：**先** `navigator.usb.requestDevice(...)`（点击后的第一个 await，
+  前面只有同步的 `setError('')`），拿到 device 之后**再**进 `withConnectLock`。
+- `runConnect(device)` 改为接收已选好的 device，不再自己 requestDevice。
+- **整体删除挂载自动重连 useEffect**（44 行）。之后只有用户点击才会连。
+- 构建 r83
+
+**这次依据是浏览器给出的确切错误文案**，不是猜的。
