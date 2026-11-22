@@ -1156,3 +1156,26 @@ Must be handling a user gesture to show a permission request
 - 新增文案：navAccount / accountTitle / accountHint / accountStatusOk / accountStatusNone /
   accountRelogin / accountPersistTitle / accountPersistHint（中英）
 - 构建 r89
+
+## 2026-11-22 23:35 - 华为账号改为移动设备页内的平级菜单 + 修复主题配色（r90）
+
+**用户反馈：**
+1. 默认主题下按钮看不清（Android / 连接设备 显示成白底白字）
+2. 华为账号不该独立成设置页，应与 Android / HarmonyOS 平级放在「移动设备」页内
+
+**样式修复：**
+- 根因：`mb-btn:disabled` 只有 opacity，没有显式背景/颜色；
+  主题变量解析不到时背景透明 → 浏览器默认白底 + 继承浅色文字 = 白底白字
+- 给所有主题变量加 fallback（`var(--x, 默认值)`），
+  并给 `.mb-btn:disabled` / `.mb-btn--primary:disabled` 显式指定背景与文字色
+
+**结构修复：**
+- 移除独立的 `settings.section`（huawei-account）
+- `MobileBridgeSection` 新增 `view` 状态（device / account），
+  顶部按钮变为三选一：**Android / HarmonyOS / 华为账号**
+- 选中「华为账号」时只渲染账号面板（登录状态、二维码、退出），
+  设备相关按钮（诊断/连接/断开/状态徽章）隐藏
+- 设备页里原来那句"去侧边栏华为账号页"的提示删除
+- 已登录时按钮后带 ✓ 标记
+
+构建 r90

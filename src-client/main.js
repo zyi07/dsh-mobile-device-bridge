@@ -7,7 +7,7 @@ import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } f
 import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChunkAt } from './hdc/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r89';
+const BUILD_TAG = 'r90';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -835,37 +835,51 @@ const CSS = `
 .mb-root { display: flex; flex-direction: column; gap: 14px; font-size: 13px; }
 .mb-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .mb-btn {
-  padding: 7px 14px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l2);
-  background: var(--dsw-alias-fill-l2); color: var(--dsw-alias-label-primary);
-  font-size: 13px; cursor: pointer;
+  padding: 7px 14px; border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.45));
+  background: var(--dsw-alias-fill-l2, rgba(127,127,127,.16));
+  color: var(--dsw-alias-label-primary, inherit);
+  font-size: 13px; cursor: pointer; font-family: inherit;
 }
-.mb-btn:hover:not(:disabled) { border-color: var(--dsw-alias-brand-primary); }
-.mb-btn:disabled { opacity: .45; cursor: not-allowed; }
-.mb-btn--primary { background: var(--dsw-alias-brand-primary); color: #fff; border-color: transparent; }
+.mb-btn:hover:not(:disabled) { border-color: var(--dsw-alias-brand-primary, #3b82f6); }
+/* disabled 时必须显式给背景与颜色：否则浏览器默认样式会变成白底白字 */
+.mb-btn:disabled {
+  opacity: .5; cursor: not-allowed;
+  background: var(--dsw-alias-fill-l2, rgba(127,127,127,.16));
+  color: var(--dsw-alias-label-primary, inherit);
+}
+.mb-btn--primary {
+  background: var(--dsw-alias-brand-primary, #3b82f6);
+  color: #fff; border-color: transparent;
+}
+.mb-btn--primary:disabled {
+  background: var(--dsw-alias-brand-primary, #3b82f6);
+  color: #fff; opacity: .5;
+}
 .mb-card {
-  border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px;
-  padding: 12px 14px; background: var(--dsw-alias-fill-l1);
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35)); border-radius: 10px;
+  padding: 12px 14px; background: var(--dsw-alias-fill-l1, rgba(127,127,127,.08));
 }
 .mb-kv { display: grid; grid-template-columns: 92px 1fr; row-gap: 4px; }
-.mb-k { color: var(--dsw-alias-label-tertiary); }
-.mb-v { color: var(--dsw-alias-label-primary); word-break: break-all; }
-.mb-note { color: var(--dsw-alias-label-tertiary); line-height: 1.6; }
+.mb-k { color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.95)); }
+.mb-v { color: var(--dsw-alias-label-primary, inherit); word-break: break-all; }
+.mb-note { color: var(--dsw-alias-label-tertiary, rgba(127,127,127,.95)); line-height: 1.6; }
 .mb-err { color: var(--dsw-alias-label-error, #d9534f); white-space: pre-wrap; line-height: 1.6; }
 .mb-input {
   flex: 1; min-width: 220px; padding: 7px 10px; border-radius: 8px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  background: var(--dsw-alias-bg-l1, transparent); color: var(--dsw-alias-label-primary);
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.45));
+  background: var(--dsw-alias-bg-l1, transparent); color: var(--dsw-alias-label-primary, inherit);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
 }
 .mb-out {
   margin: 0; padding: 10px; border-radius: 8px; max-height: 260px; overflow: auto;
-  background: var(--dsw-alias-fill-l2); color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-fill-l2, rgba(127,127,127,.16)); color: var(--dsw-alias-label-primary, inherit);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px; white-space: pre-wrap; word-break: break-all;
 }
 .mb-badge {
   display: inline-block; padding: 1px 8px; border-radius: 9px; font-size: 11px; line-height: 18px;
-  border: 1px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-secondary);
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.45)); color: var(--dsw-alias-label-secondary, rgba(127,127,127,.95));
 }
 `;
 
@@ -875,32 +889,18 @@ const CSS = `
  * 登录态由宿主持久化在 ~/.dsh/agc-session.json，页面挂载时自动恢复，
  * 所以插件重载、切页、重连手机都不需要重新登录。
  */
-function HuaweiAccountSection(props) {
-  const t = props.t;
-  const [, setTick] = React.useState(0);
-  const [copied, setCopied] = React.useState(false);
-
-  React.useEffect(() => {
-    agcRestoreSession();
-    const id = setInterval(() => setTick((n) => n + 1), 1500);
-    return () => clearInterval(id);
-  }, []);
-
+/** 构建「华为账号」面板（内嵌在移动设备页，与 Android / HarmonyOS 平级切换） */
+function buildHuaweiAccountPanel(t) {
   const agc = STATE.agc || { state: 'idle' };
-  const savedAtText = agc.savedAt
-    ? new Date(agc.savedAt * 1000).toLocaleString()
-    : '';
+  const savedAtText = agc.savedAt ? new Date(agc.savedAt * 1000).toLocaleString() : '';
+  const out = [];
 
-  const children = [h('style', { key: 's' }, CSS)];
-
-  children.push(h('div', { key: 'h', className: 'mb-card' },
-    h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, t('accountTitle')),
+  out.push(h('div', { key: 'acc-h', className: 'mb-card' },
     h('div', { className: 'mb-note', style: { lineHeight: 1.7 } }, t('accountHint')),
 
-    // 状态
     h('div', { style: { marginTop: '10px' } },
       agc.state === 'success'
-        ? h('div', { style: { color: '#4ade80', fontWeight: 600 } },
+        ? h('div', { style: { color: '#22c55e', fontWeight: 600 } },
             '✅ ' + t('accountStatusOk')
             + (agc.cookieCount ? `（${agc.cookieCount} 条 Cookie）` : '')
             + (savedAtText ? `，登录于 ${savedAtText}` : ''))
@@ -939,16 +939,17 @@ function HuaweiAccountSection(props) {
       : null,
   ));
 
-  children.push(h('div', { key: 'p', className: 'mb-card', style: { marginTop: '10px' } },
+  out.push(h('div', { key: 'acc-p', className: 'mb-card' },
     h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, t('accountPersistTitle')),
     h('div', { className: 'mb-note', style: { lineHeight: 1.7 } }, t('accountPersistHint')),
   ));
 
-  return h('div', { className: 'mb-root' }, children);
+  return out;
 }
 
 function MobileBridgeSection(props) {
   const t = props.t;
+  const [view, setView] = React.useState('device');   // device | account（与 Android/HarmonyOS 平级）
   const [phase, setPhase] = React.useState((STATE.adb || STATE.hdc) ? 'connected' : 'idle');
   const [kind, setKind] = React.useState(STATE.kind || 'adb');
   const [error, setError] = React.useState('');
@@ -970,6 +971,7 @@ function MobileBridgeSection(props) {
   React.useEffect(() => {
     const id = setInterval(() => setTick((n) => n + 1), 2000);
     STATE.notify = (text) => setOut(text);
+    agcRestoreSession();      // 打开设置页就把已保存的华为登录态读回来
     return () => { clearInterval(id); if (STATE.notify) { STATE.notify = null; } };
   }, []);
 
@@ -1183,17 +1185,23 @@ function MobileBridgeSection(props) {
       h('span', { key: 't0', className: 'mb-note' }, t('kindLabel')),
       h('button', {
         key: 'kadb',
-        className: 'mb-btn' + (kind === 'adb' ? ' mb-btn--primary' : ''),
-        disabled: !!STATE.adb || !!STATE.hdc,
-        onClick: () => { setKind('adb'); },
+        className: 'mb-btn' + (view === 'device' && kind === 'adb' ? ' mb-btn--primary' : ''),
+        disabled: (view === 'device' && kind === 'adb') || !!STATE.adb || !!STATE.hdc,
+        onClick: () => { setView('device'); setKind('adb'); },
       }, t('kindAdb')),
       h('button', {
         key: 'khdc',
-        className: 'mb-btn' + (kind === 'hdc' ? ' mb-btn--primary' : ''),
-        disabled: !!STATE.adb || !!STATE.hdc,
-        onClick: () => { setKind('hdc'); },
+        className: 'mb-btn' + (view === 'device' && kind === 'hdc' ? ' mb-btn--primary' : ''),
+        disabled: (view === 'device' && kind === 'hdc') || !!STATE.adb || !!STATE.hdc,
+        onClick: () => { setView('device'); setKind('hdc'); },
       }, t('kindHdc')),
       h('button', {
+        key: 'kacc',
+        className: 'mb-btn' + (view === 'account' ? ' mb-btn--primary' : ''),
+        onClick: () => setView('account'),
+      }, t('navAccount') + (STATE.agc && STATE.agc.state === 'success' ? ' ✓' : '')),
+
+      view === 'account' ? null : h('button', {
         key: 'diag',
         className: 'mb-btn',
         onClick: async () => {
@@ -1207,19 +1215,26 @@ function MobileBridgeSection(props) {
           }
         },
       }, t('diagnose')),
-      h('button', {
+      view === 'account' ? null : h('button', {
         key: 'c',
         className: 'mb-btn mb-btn--primary',
         disabled: phase === 'connecting' || !usbSupported,
         onClick: connect,
       }, phase === 'connecting' ? t('connecting') : t('connect')),
-      phase === 'connected'
+      view === 'account' ? null : (phase === 'connected'
         ? h('button', { key: 'd', className: 'mb-btn', onClick: disconnect }, t('disconnect'))
-        : null,
-      h('span', { key: 'b', className: 'mb-badge' }, phaseLabel),
+        : null),
+      view === 'account' ? null : h('span', { key: 'b', className: 'mb-badge' }, phaseLabel),
       h('span', { key: 'build', className: 'mb-badge' }, BUILD_TAG),
     ),
   ];
+
+  // 华为账号视图：只渲染账号面板（与设备视图平级切换）
+  if (view === 'account') {
+    for (const el of buildHuaweiAccountPanel(t)) { children.push(el); }
+    children.push(h('div', { key: 'n2', className: 'mb-note' }, t('accountHintShort')));
+    return h('div', { className: 'mb-root' }, children);
+  }
 
   if (phase === 'reconnecting') {
     children.push(h('div', { key: 'rc', className: 'mb-note' }, t('reconnectingHint')));
@@ -1284,12 +1299,6 @@ function MobileBridgeSection(props) {
         '包名 com.dsh.bridgeapp，已用你的调试证书签名，调试 Profile 里绑定了你这台手机（<DEVICE_UDID>）。'),
     ));
 
-    // 华为账号已独立成「华为账号」设置页，这里只放一句指引
-    children.push(h('div', { key: 'agclink', className: 'mb-note', style: { marginTop: '10px' } },
-      (STATE.agc && STATE.agc.state === 'success')
-        ? '✅ 华为账号已登录（可在侧边栏「华为账号」页管理），签名安装无需再登录。'
-        : '需要自动签名安装 HAP？请到侧边栏「华为账号」页扫码登录（一次登录长期有效）。'));
-
     children.push(h('div', { key: 'sh', className: 'mb-row' },
       h('input', {
         className: 'mb-input',
@@ -1341,6 +1350,7 @@ export function apply(ctx) {
       hintHdc: '连接会跟着页面保留：关掉设置、切到别页再回来都不用重连；刷新页面则会断开。需要在手机上开启「USB 调试」，并且本机不能有 hdc / DevEco Studio 正在占用设备（连接前先执行 hdc kill）。首次连接需要在手机上点「允许 / 始终信任」；之后同一把密钥不会再询问。连接建立后才可用命令与截图。',
       navAccount: '华为账号',
       accountTitle: '华为账号登录',
+      accountHintShort: '登录态保存在本机，插件重载、切页、重连手机都不需要重新登录。',
       accountHint: '用手机「控制中心 → 扫一扫」扫码登录华为开发者账号。登录后本插件可以自动为你申请调试证书、生成调试 Profile 并给 HAP 签名——整个过程不需要你手动准备任何签名材料。',
       accountStatusOk: '已登录',
       accountStatusNone: '未登录',
@@ -1410,6 +1420,7 @@ export function apply(ctx) {
       hintHdc: 'The connection survives closing settings or switching pages; reloading drops it. Enable USB debugging on the phone and make sure no hdc / DevEco Studio is holding the device (run hdc kill first). On first connect tap Allow / Always trust on the phone; the saved key is not asked for again. Commands and screenshots work once connected.',
       navAccount: 'Huawei account',
       accountTitle: 'Huawei account sign-in',
+      accountHintShort: 'The session is stored on this machine; reloading, switching pages or reconnecting the phone needs no new sign-in.',
       accountHint: 'Scan the QR with your phone (Control Center > Scan) to sign in. Once signed in, the plugin requests a debug certificate, mints a debug profile and signs HAPs for you - no signing material needed on your side.',
       accountStatusOk: 'Signed in',
       accountStatusNone: 'Not signed in',
@@ -1487,15 +1498,6 @@ export function apply(ctx) {
       if (stopBridge) { stopBridge(); }
     };
   }, 'mobile-bridge: host bridge');
-
-  ctx.slots.inject('settings.section', () => ctx.slots.register({
-    name: 'settings.section',
-    id: 'huawei-account',
-    order: 31,
-    label: () => t('navAccount'),
-    locale: NS,
-    inject: () => ({ t }),
-  }, HuaweiAccountSection));
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
