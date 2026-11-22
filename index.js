@@ -1,3 +1,8 @@
+import { spawn as nodeSpawn } from 'node:child_process';
+import nodePath from 'node:path';
+import nodeOs from 'node:os';
+import { fileURLToPath as nodeFileURLToPath } from 'node:url';
+
 /**
  * Host half of dsh-mobile-bridge.
  *
@@ -43,6 +48,55 @@ export function apply(ctx) {
 
   const now = () => Date.now();
   const browserAlive = () => now() - lastSeen < BROWSER_STALE_MS;
+
+  // ---- 华为账号扫码登录（宿主侧起真实浏览器，插件里显示二维码）----
+  let agcLoginProc = null;
+  let agcLoginBuf = "";
+  let agcLoginWaiters = [];
+
+  function agcEnsureProc() {
+    if (agcLoginProc && !agcLoginProc.killed) { return agcLoginProc; }
+    const here = nodePath.dirname(nodeFileURLToPath(import.meta.url));
+    const script = nodePath.join(here, 'tools', 'agc_login.py');
+    const proc = nodeSpawn('python3', [script], { stdio: ['pipe', 'pipe', 'pipe'] });
+    agcLoginProc = proc;
+    let stderrBuf = "";
+    proc.stdout.setEncoding('utf8');
+    proc.stdout.on('data', (chunk) => {
+      agcLoginBuf += chunk;
+      let idx;
+      while ((idx = agcLoginBuf.indexOf('\n')) >= 0) {
+        const line = agcLoginBuf.slice(0, idx).trim();
+        agcLoginBuf = agcLoginBuf.slice(idx + 1);
+        if (!line) { continue; }
+        let obj = null;
+        try { obj = JSON.parse(line); } catch { obj = { ok: false, error: line.slice(0, 200) }; }
+        const w = agcLoginWaiters.shift();
+        if (w) { w(obj); }
+      }
+    });
+    proc.stderr.setEncoding('utf8');
+    proc.stderr.on('data', (c) => { stderrBuf = (stderrBuf + c).slice(-4000); });
+    proc.on('exit', () => {
+      agcLoginProc = null;
+      const ws = agcLoginWaiters;
+      agcLoginWaiters = [];
+      ws.forEach((w) => w({ ok: false, error: '登录服务已退出: ' + stderrBuf.slice(-300) }));
+    });
+    return proc;
+  }
+
+  function agcCommand(cmd, timeoutMs = 150000) {
+    const proc = agcEnsureProc();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`登录服务超时（${timeoutMs}ms）`)), timeoutMs);
+      if (timer.unref) { timer.unref(); }
+      agcLoginWaiters.push((obj) => { clearTimeout(timer); resolve(obj); });
+      try { proc.stdin.write(cmd + '\n'); } catch (e) { clearTimeout(timer); reject(e); }
+    });
+  }
+
+  function agcSessionFile() { return nodePath.join(nodeOs.homedir(), '.dsh', 'agc-session.json'); }
 
   function enqueue(kind, data, timeoutMs) {
     const id = ++seq;
@@ -202,6 +256,44 @@ export function apply(ctx) {
             const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 120000, 1000), 600000);
             const r = await enqueue('uninstall', { bundle: String(body.bundle) }, timeoutMs);
             send(res, 200, { ok: true, device, output: r.output });
+            return;
+          }
+
+          // ---- 华为账号登录（扫码）----
+          if (path === ROUTE_PREFIX + '/agc/login/start' && req.method === 'POST') {
+            const r = await agcCommand('start', 180000);
+            send(res, 200, r);
+            return;
+          }
+          if (path === ROUTE_PREFIX + '/agc/login/status' && req.method === 'GET') {
+            const r = await agcCommand('status', 60000);
+            send(res, 200, r);
+            return;
+          }
+          if (path === ROUTE_PREFIX + '/agc/login/close' && req.method === 'POST') {
+            try {
+              await agcCommand('close', 30000);
+            } catch { /* 进程可能已退出 */ }
+            if (agcLoginProc) { try { agcLoginProc.stdin.end(); } catch { /* ignore */ } }
+            agcLoginProc = null;
+            send(res, 200, { ok: true });
+            return;
+          }
+          if (path === ROUTE_PREFIX + '/agc/session' && req.method === 'GET') {
+            // 只报告是否存在与采集时间，绝不回传 Cookie 内容
+            try {
+              const fs = await import('node:fs/promises');
+              const raw = await fs.readFile(agcSessionFile(), 'utf8');
+              const d = JSON.parse(raw);
+              send(res, 200, {
+                ok: true,
+                present: true,
+                cookieCount: (d.cookies || []).length,
+                savedAt: d.savedAt,
+              });
+            } catch {
+              send(res, 200, { ok: true, present: false });
+            }
             return;
           }
 

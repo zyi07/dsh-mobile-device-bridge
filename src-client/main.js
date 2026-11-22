@@ -7,7 +7,7 @@ import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } f
 import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChunkAt } from './hdc/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r71';
+const BUILD_TAG = 'r72';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -69,6 +69,7 @@ const STATE = {
   connectInFlight: null,  // 串行化：同一时刻只允许一个连接流程
   hdcPending: null,   // 进行中的 HDC 会话（自动重连/手动连接都可能留下）
   keepAlive: null,    // 后台保活句柄
+  agc: { state: 'idle', qr: '', message: '' },   // 华为账号登录状态
   connection: null,   // 宿主 RPC 连接（用于把 HDC 日志送到宿主落盘）
 };
 
@@ -134,6 +135,55 @@ async function tryReconnectHdc() {
     pushHdcLog('INFO', `自动重连失败：${(e && e.message) || e}`);
     return false;
   }
+}
+
+const AGC_API = '/mbridge/agc';
+
+/** 发起华为账号扫码登录（宿主起真实浏览器，我们显示二维码） */
+async function agcStartLogin() {
+  STATE.agc = { state: 'loading', qr: '', message: '正在打开华为登录页…' };
+  try {
+    const r = await fetch(AGC_API + '/login/start', { method: 'POST' });
+    const d = await r.json();
+    STATE.agc = {
+      state: d.state || (d.ok ? 'waiting' : 'failed'),
+      qr: d.qr || '',
+      message: d.message || d.error || '',
+      url: d.url || '',
+    };
+    startAgcPolling();
+  } catch (e) {
+    STATE.agc = { state: 'failed', qr: '', message: String(e && e.message ? e.message : e) };
+  }
+}
+
+let agcPollTimer = null;
+function startAgcPolling() {
+  if (agcPollTimer) { return; }
+  agcPollTimer = setInterval(async () => {
+    if (STATE.agc.state !== 'waiting' && STATE.agc.state !== 'loading') {
+      clearInterval(agcPollTimer);
+      agcPollTimer = null;
+      return;
+    }
+    try {
+      const r = await fetch(AGC_API + '/login/status');
+      const d = await r.json();
+      STATE.agc = {
+        state: d.state || STATE.agc.state,
+        qr: d.qr || STATE.agc.qr,
+        message: d.message || '',
+        cookieCount: d.cookieCount,
+      };
+    } catch { /* 忽略单次失败 */ }
+  }, 3000);
+}
+
+async function agcClearSession() {
+  try {
+    await fetch(AGC_API + '/login/close', { method: 'POST' });
+  } catch { /* ignore */ }
+  STATE.agc = { state: 'idle', qr: '', message: '已清除登录态' };
 }
 
 /** 把 HDC 日志送到宿主写文件，便于直接读取而不必截屏。 */
@@ -910,6 +960,40 @@ function MobileBridgeSection(props) {
       ),
     ));
 
+    // ---- 华为账号登录（自动签名用）----
+    const agc = STATE.agc || { state: 'idle' };
+    children.push(h('details', { key: 'agc', className: 'mb-card', style: { marginTop: '10px' } },
+      h('summary', { style: { cursor: 'pointer', userSelect: 'none' } }, t('agcTitle')),
+      h('div', { className: 'mb-note', style: { marginTop: '6px', lineHeight: 1.6 } }, t('agcHint')),
+      h('div', { className: 'mb-row', style: { marginTop: '8px' } },
+        h('button', { className: 'mb-btn', onClick: agcStartLogin }, t('agcLogin')),
+        h('button', { className: 'mb-btn', onClick: agcClearSession }, t('agcLogout')),
+      ),
+      agc.state === 'loading'
+        ? h('div', { className: 'mb-note', style: { marginTop: '8px' } }, agc.message || '正在打开…')
+        : null,
+      agc.state === 'waiting'
+        ? h('div', { style: { marginTop: '10px' } },
+            h('div', { className: 'mb-note' }, t('agcWaiting')),
+            agc.qr
+              ? h('img', {
+                  src: 'data:image/png;base64,' + agc.qr,
+                  style: { display: 'block', marginTop: '8px', width: '260px', borderRadius: '6px', background: '#fff' },
+                })
+              : h('div', { className: 'mb-note' }, t('agcNoQr')),
+            h('button', { className: 'mb-btn', style: { marginTop: '8px' }, onClick: agcStartLogin }, t('agcRefresh')),
+          )
+        : null,
+      agc.state === 'success'
+        ? h('div', { className: 'mb-note', style: { marginTop: '8px', color: '#4ade80' } },
+            t('agcSuccess') + (agc.cookieCount ? `（${agc.cookieCount} 条 Cookie）` : ''))
+        : null,
+      agc.state === 'failed'
+        ? h('div', { className: 'mb-err', style: { marginTop: '8px' } },
+            t('agcFailed') + (agc.message ? '：' + agc.message : ''))
+        : null,
+    ));
+
     children.push(h('div', { key: 'sh', className: 'mb-row' },
       h('input', {
         className: 'mb-input',
@@ -959,6 +1043,15 @@ export function apply(ctx) {
       diagnose: '诊断',
       hintAdb: '连接会跟着页面保留：关掉设置、切到别页再回来都不用重连；刷新页面则会断开，之后会自动尝试恢复。需要在手机上开启「USB 调试」，首次连接时手机会弹出授权提示。同一时刻只能有一个程序占用 USB，请先停掉本机的 adb server、Android Studio、scrcpy 等。',
       hintHdc: '连接会跟着页面保留：关掉设置、切到别页再回来都不用重连；刷新页面则会断开。需要在手机上开启「USB 调试」，并且本机不能有 hdc / DevEco Studio 正在占用设备（连接前先执行 hdc kill）。首次连接需要在手机上点「允许 / 始终信任」；之后同一把密钥不会再询问。连接建立后才可用命令与截图。',
+      agcTitle: '华为账号登录（用于自动签名安装）',
+      agcHint: '用手机「控制中心 → 扫一扫」扫码登录华为开发者账号。登录态只保存在本机，用于自动申请调试证书与 Profile；不需要你手工准备已签名的 HAP。',
+      agcLogin: '开始登录（显示二维码）',
+      agcRefresh: '刷新二维码',
+      agcLogout: '清除登录态',
+      agcWaiting: '等待扫码…二维码约 2 分钟有效',
+      agcSuccess: '已登录，登录态已保存',
+      agcFailed: '登录失败',
+      agcNoQr: '点「开始登录」后在手机扫码',
       hdcKeyTitle: '密钥设置（默认已自动保存，无需操作）',
       hdcKeyReset: '重置密钥',
       hdcKeyStored: '默认会保存一把密钥并复用，授权只需做一次；只有想换密钥时才需要点重置',
@@ -997,6 +1090,15 @@ export function apply(ctx) {
       diagnose: 'Diagnose',
       hintAdb: 'The connection survives closing settings or switching pages; reloading the page drops it and it will try to reconnect. Enable USB debugging on the phone and confirm the authorization prompt on first connect. Only one program may hold the USB device, so stop the adb server, Android Studio and scrcpy first.',
       hintHdc: 'The connection survives closing settings or switching pages; reloading drops it. Enable USB debugging on the phone and make sure no hdc / DevEco Studio is holding the device (run hdc kill first). On first connect tap Allow / Always trust on the phone; the saved key is not asked for again. Commands and screenshots work once connected.',
+      agcTitle: 'Huawei account sign-in (for automatic signing)',
+      agcHint: 'Scan the QR with your phone (Control Center > Scan) to sign in. The session stays on this machine and is used to request a debug certificate and profile; you do not need to supply a pre-signed HAP.',
+      agcLogin: 'Start sign-in (show QR)',
+      agcRefresh: 'Refresh QR',
+      agcLogout: 'Clear session',
+      agcWaiting: 'Waiting for the scan - the QR expires after about two minutes',
+      agcSuccess: 'Signed in, session saved',
+      agcFailed: 'Sign-in failed',
+      agcNoQr: 'Click Start sign-in, then scan with your phone',
       hdcKeyTitle: 'Key settings (a key is generated and saved automatically)',
       hdcKeyReset: 'Reset key',
       hdcKeyStored: 'The generated key is kept and reused, so authorization is needed once. Reset only if you want a new key.',

@@ -774,3 +774,30 @@ HTTP 100 后直接断开。虽然已把 push/install 上限放宽到 128MiB，�
 不一致/远端不存在即报错；installHap 在 `bm install` 前也先校验包完整性。
 
 清理了 `/data/local/tmp` 下全部测试残留。构建标记 r71。
+
+## 2026-11-22 18:05 - 把「华为账号登录」搬进插件（扫码，自动取凭证）
+
+**目标（用户要求）：** 不再让用户从 F12 复制 Cookie，插件里直接登录并自动抓取凭证。
+
+**实现：**
+- `tools/agc_login.py`：宿主侧登录守护进程（Playwright + Chromium）
+  - `start`：打开 AGC → 点「登录」→ 截取二维码（裁剪 560×420）返回 base64
+  - `status`：轮询登录状态；成功后把 Cookie 写入 `~/.dsh/agc-session.json`（0600）
+  - `close`：关闭浏览器与进程
+- `index.js`：ESM 化（原本误用 `require`，宿主是 ESM）
+  - 守护进程管理（stdin 写命令 / stdout 读 JSON 行，带超时与退出处理）
+  - 路由：`POST /mbridge/agc/login/start`、`GET /mbridge/agc/login/status`、
+    `POST /mbridge/agc/login/close`、`GET /mbridge/agc/session`（只报告条数与时间，**不回传 Cookie**）
+- `src-client/main.js`：设置页新增「华为账号登录（用于自动签名安装）」折叠区
+  - 按钮：开始登录 / 刷新二维码 / 清除登录态
+  - 显示二维码图片 + 状态（等待扫码 / 成功 / 失败）
+
+**真机/真网验证：**
+- 宿主成功渲染华为登录页（`id7.cloud.huawei.com/CAS/portal/loginAuth.html`）
+- 二维码截取成功（16,377 字节 PNG，肉眼可扫）
+- 路由返回 `state=waiting`
+
+**下一步：** 用户扫码后 → 用保存的 Cookie 调 AGC 接口
+（建应用 → 注册 UDID → CSR 换证书 → 生成调试 Profile）→ 签名 → 安装。
+
+构建标记 r72
