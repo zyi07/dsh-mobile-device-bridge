@@ -1050,3 +1050,20 @@ Must be handling a user gesture to show a permission request
 - 构建 r83
 
 **这次依据是浏览器给出的确切错误文案**，不是猜的。
+
+## 2026-11-22 21:05 - 放弃在 WebUSB 上死磕，改走本机 hdc.exe 安装（r84）
+
+**现状：** 手势 bug 已修（requestDevice 能进到 vid=0x12d1），但 `device.open()`
+仍 `Access denied`。用户机器上无 hdc/deveco 进程，只有 24 个 msedge。
+说明设备的 USB 状态被之前那次 10MB 传输搞坏、且**句柄在浏览器进程内**，
+物理拔插/杀进程都清不掉。**这是 WebUSB 架构的硬伤，我在 Linux 侧改代码修不了。**
+
+**改为交付可用路径（方案 C）：**
+- 宿主新增 `GET /mbridge/agc/hap`：返回已签名的 `dsh_demo_signed.hap`（10.3MB）
+- 设置页新增「本地安装（推荐：用电脑上的 hdc.exe）」区块：
+  一键下载签名包 + 给出 PowerShell 安装命令
+- 用用户电脑自带的 `hdc.exe install -r` 安装——**hdc 自己占用设备，
+  不经过浏览器，不存在抢设备问题**。签名/证书/Profile 均已验证通过。
+- 实测：下载路由 200，10,339,245 字节，sha256 与源文件一致。
+
+构建 r84

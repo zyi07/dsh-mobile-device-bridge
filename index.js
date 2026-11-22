@@ -294,6 +294,25 @@ export function apply(ctx) {
             return;
           }
           // 浏览器扩展把本机浏览器的 AGC 登录态发过来（用户在自己浏览器原生登录）
+          // 提供已签名 HAP 下载（用本机 hdc 安装，绕开 WebUSB 抢设备）
+          if (path === ROUTE_PREFIX + '/agc/hap' && req.method === 'GET') {
+            const fs = await import('node:fs/promises');
+            const here = nodePath.dirname(nodeFileURLToPath(import.meta.url));
+            const file = nodePath.join(here, 'assets', 'dsh_demo_signed.hap');
+            try {
+              const buf = await fs.readFile(file);
+              res.writeHead(200, {
+                'content-type': 'application/octet-stream',
+                'content-disposition': 'attachment; filename="dsh_demo_signed.hap"',
+                'content-length': String(buf.length),
+              });
+              res.end(buf);
+            } catch (e) {
+              send(res, 404, { ok: false, error: '安装包不存在：' + String(e && e.message ? e.message : e) });
+            }
+            return;
+          }
+
           if (path === ROUTE_PREFIX + '/agc/cookie' && req.method === 'POST') {
             const body = await readBody(req, 4 << 20);
             const cookieHeader = String(body.cookieHeader || '');

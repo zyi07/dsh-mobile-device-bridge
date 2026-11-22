@@ -7,7 +7,7 @@ import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } f
 import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChunkAt } from './hdc/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r83';
+const BUILD_TAG = 'r84';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -1043,6 +1043,27 @@ function MobileBridgeSection(props) {
         h('span', { className: 'mb-v' },
           '0x' + info.vendorId.toString(16) + ' / 0x' + info.productId.toString(16)),
       ),
+    ));
+
+    // ---- 本地安装（绕开 WebUSB，用本机 hdc.exe）----
+    children.push(h('details', { key: 'locinstall', className: 'mb-card', style: { marginTop: '10px' } },
+      h('summary', { style: { cursor: 'pointer', userSelect: 'none' } }, '本地安装（推荐：用电脑上的 hdc.exe）'),
+      h('div', { className: 'mb-note', style: { marginTop: '6px', lineHeight: 1.7 } },
+        '如果 WebUSB 一直报「设备被独占」，用这个方法：下载已签名的安装包，'
+        + '用你电脑上 DevEco 自带的 hdc.exe 安装。hdc 自己占用设备，不经过浏览器，不会冲突。'),
+      h('div', { className: 'mb-row', style: { marginTop: '8px' } },
+        h('a', {
+          className: 'mb-btn',
+          href: '/mbridge/agc/hap',
+          download: 'dsh_demo_signed.hap',
+          style: { textDecoration: 'none', display: 'inline-block' },
+        }, '下载签名包（9.9 MB）'),
+      ),
+      h('div', { className: 'mb-note', style: { marginTop: '10px' } }, '下载完成后，在 PowerShell 里运行这一条：'),
+      h('pre', { className: 'mb-out', style: { whiteSpace: 'pre-wrap', userSelect: 'all' } },
+        '& "C:\\Program Files\\Huawei\\DevEco Studio\\sdk\\default\\openharmony\\toolchains\\hdc.exe" install -r "$env:USERPROFILE\\Downloads\\dsh_demo_signed.hap"'),
+      h('div', { className: 'mb-note', style: { marginTop: '6px' } },
+        '包名 com.dsh.bridgeapp，已用你的调试证书签名，调试 Profile 里绑定了你这台手机（<DEVICE_UDID>）。'),
     ));
 
     // ---- 华为账号登录（自动签名用）----
