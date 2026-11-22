@@ -292,6 +292,58 @@ export function apply(ctx) {
             send(res, 200, r);
             return;
           }
+          // 浏览器扩展把本机浏览器的 AGC 登录态发过来（用户在自己浏览器原生登录）
+          if (path === ROUTE_PREFIX + '/agc/cookie' && req.method === 'POST') {
+            const body = await readBody(req, 4 << 20);
+            const cookieHeader = String(body.cookieHeader || '');
+            if (!cookieHeader) {
+              send(res, 400, { ok: false, error: '缺少 cookieHeader' });
+              return;
+            }
+            const fs = await import('node:fs/promises');
+            const file = agcSessionFile();
+            await fs.mkdir(nodePath.dirname(file), { recursive: true });
+            await fs.writeFile(file, JSON.stringify({
+              cookieHeader,
+              csrf: String(body.csrf || ''),
+              cookies: Array.isArray(body.cookies) ? body.cookies : [],
+              savedAt: Number(body.savedAt) || Date.now() / 1000,
+              source: String(body.source || 'extension'),
+            }), { mode: 0o600 });
+            send(res, 200, {
+              ok: true,
+              count: Array.isArray(body.cookies) ? body.cookies.length : 0,
+              savedAt: Date.now() / 1000,
+            });
+            return;
+          }
+
+          // 下载扩展压缩包（浏览器直接从本机 DSH 取，不用传文件）
+          if (path === ROUTE_PREFIX + '/agc/extension.zip' && req.method === 'GET') {
+            const fs = await import('node:fs/promises');
+            const here = nodePath.dirname(nodeFileURLToPath(import.meta.url));
+            const tmpZip = nodePath.join(nodeOs.tmpdir(), 'dsh-agc-helper.zip');
+            try {
+              await new Promise((resolve, reject) => {
+                const py = nodeSpawn('python3', ['-c',
+                  `import shutil;shutil.make_archive(r"${tmpZip.replace(/\.zip$/, '')}", "zip", r"${nodePath.join(here, 'extension')}")`,
+                ]);
+                py.on('exit', (code) => (code === 0 ? resolve() : reject(new Error('zip 失败 ' + code))));
+                py.on('error', reject);
+              });
+              const buf = await fs.readFile(tmpZip);
+              res.writeHead(200, {
+                'content-type': 'application/zip',
+                'content-disposition': 'attachment; filename="dsh-agc-helper.zip"',
+                'content-length': String(buf.length),
+              });
+              res.end(buf);
+            } catch (e) {
+              send(res, 500, { ok: false, error: String(e && e.message ? e.message : e) });
+            }
+            return;
+          }
+
           if (path === ROUTE_PREFIX + '/agc/view' && req.method === 'GET') {
             const r = await agcCommand('view', 60000);
             send(res, 200, r);

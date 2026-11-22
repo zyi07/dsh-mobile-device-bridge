@@ -7049,7 +7049,7 @@ async function uninstallBundle(session, bundleName) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r75';
+const BUILD_TAG = 'r76';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -7295,6 +7295,21 @@ function startAgcViewLoop() {
     }
     agcRefreshView();
   }, 2500);
+}
+
+async function agcCheckSession() {
+  try {
+    const r = await fetch(AGC_API + '/session');
+    const d = await r.json();
+    if (d.present) {
+      const t = d.savedAt ? new Date(d.savedAt * 1000).toLocaleString() : '';
+      STATE.agc = { ...STATE.agc, state: 'success', message: `已有登录态（${d.cookieCount} 条 Cookie，采集于 ${t}）` };
+    } else {
+      STATE.agc = { ...STATE.agc, state: 'failed', message: '还没有登录态：请按上面步骤在浏览器里登录并点扩展发送' };
+    }
+  } catch (e) {
+    STATE.agc = { ...STATE.agc, state: 'failed', message: '检查失败：' + String(e && e.message ? e.message : e) };
+  }
 }
 
 async function agcClearSession() {
@@ -8090,9 +8105,24 @@ function MobileBridgeSection(props) {
         h('button', { className: 'mb-btn', onClick: agcStartLogin }, t('agcLogin')),
         h('button', { className: 'mb-btn', onClick: agcClearSession }, t('agcLogout')),
       ),
+      // 方式一：本机浏览器登录（扩展转发登录态）
+      h('div', { style: { marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '10px' } },
+        h('div', { className: 'mb-note', style: { fontWeight: 600 } }, t('agcExtTitle')),
+        h('div', { className: 'mb-note', style: { marginTop: '6px', lineHeight: 1.7 } }, t('agcExtHint')),
+        h('div', { className: 'mb-row', style: { marginTop: '8px' } },
+          h('a', {
+            className: 'mb-btn',
+            href: AGC_API + '/extension.zip',
+            download: 'dsh-agc-helper.zip',
+            style: { textDecoration: 'none', display: 'inline-block' },
+          }, t('agcExtDownload')),
+          h('button', { className: 'mb-btn', style: { marginLeft: '8px' }, onClick: agcCheckSession }, t('agcCheck')),
+        ),
+      ),
+
       // 账号密码登录
       h('div', { style: { marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '10px' } },
-        h('div', { className: 'mb-note', style: { fontWeight: 600 } }, t('agcPwdTitle')),
+        h('div', { className: 'mb-note', style: { fontWeight: 600 } }, '方式二：' + t('agcPwdTitle')),
         h('input', {
           className: 'mb-input',
           placeholder: t('agcAccount'),
@@ -8277,6 +8307,10 @@ function apply(ctx) {
       agcCodeSubmit: '提交验证码',
       agcPwdHint: '账号密码只在本机转发给登录进程，不写日志、不保存。若弹出滑块验证，直接在下面的画面上拖动即可。',
       agcManual: '手动完成验证（在画面上拖动滑块 / 点击）',
+      agcExtTitle: '方式一：用你本机的浏览器登录（推荐）',
+      agcExtHint: '1) 点下面下载扩展 → 解压；2) 浏览器打开 chrome://extensions 或 edge://extensions，开启「开发者模式」，选择「加载已解压的扩展程序」，选中解压出来的文件夹；3) 在浏览器里正常登录 developer.huawei.com（密码/短信/扫码都行）；4) 点浏览器工具栏里的扩展图标 →「发送登录态给 DSH」。',
+      agcExtDownload: '下载扩展（zip）',
+      agcCheck: '检查登录态',
       agcManualBtn: '打开浏览器画面',
       agcViewHint: '画面来自宿主的浏览器。拖动滑块：在图上按住并往右拖；也可以直接点击。',
       hdcKeyTitle: '密钥设置（默认已自动保存，无需操作）',

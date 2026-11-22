@@ -19,6 +19,7 @@
 import asyncio
 import base64
 import io
+from urllib.parse import urlsplit
 import json
 import os
 import sys
@@ -32,6 +33,21 @@ LOGIN_TIMEOUT = 300      # 秒，超时判定失败
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+
+def is_on_agc(url: str) -> bool:
+    """是否已经回到 AGC 页面。
+
+    只能看 hostname + path：跳转回来的 URL 查询参数里仍然可能带
+    loginUrl=...loginAuth.html，对整条 URL 做子串判断会永远为假。
+    """
+    try:
+        parts = urlsplit(url)
+    except Exception:
+        return False
+    host = (parts.hostname or "").lower()
+    path = (parts.path or "").lower()
+    return host.endswith("developer.huawei.com") and "loginAuth" not in path
 
 
 class LoginSession:
@@ -50,7 +66,13 @@ class LoginSession:
         self.need_code = False    # 是否需要短信验证码
         self.loop = None
 
-    async def start(self, mode="qr"):
+    async def start(self, mode="qr", force=False):
+        # 已有等待中的会话时直接复用，避免把用户正在扫的二维码弄失效
+        if (not force and self.page and self.state in ("waiting", "need_code", "need_captcha")):
+            self.mode = mode
+            if not self.qr_b64:
+                await self._capture_qr()
+            return
         self.mode = mode
         from playwright.async_api import async_playwright
         if self.browser:
@@ -131,9 +153,8 @@ class LoginSession:
                 return {"ok": False, "error": f"未知动作 {kind}"}
             await self.page.wait_for_timeout(600)
             # 动作后顺便判定是否已经登录成功
-            if "developer.huawei.com" in self.page.url and "loginAuth" not in self.page.url:
-                if not await self._already_logged_in():
-                    await self._finish_success("登录成功（手动验证）")
+            if is_on_agc(self.page.url):
+                await self._finish_success("登录成功（手动验证）")
             return {"ok": True, "state": self.state, "url": self.page.url[:160],
                     "message": self.message}
         except Exception as e:
@@ -178,10 +199,9 @@ class LoginSession:
         for _ in range(20):
             await self.page.wait_for_timeout(1500)
             url = self.page.url
-            if "developer.huawei.com" in url and "loginAuth" not in url:
-                if not await self._already_logged_in():
-                    await self._finish_success("登录成功")
-                    return
+            if is_on_agc(url):
+                await self._finish_success("登录成功")
+                return
             # 需要短信验证码
             code_input = self.page.locator(
                 "input[placeholder*='验证码'], input[maxlength='6'], .hwid-verify-input input")
@@ -331,11 +351,12 @@ class LoginSession:
             self.message = "会话未启动"
             return
         url = self.page.url
-        # 登录成功后会被带回 developer.huawei.com
-        if "developer.huawei.com" in url and "loginAuth" not in url:
-            if not await self._already_logged_in():
-                await self._finish_success("登录成功，已获取会话")
-                return
+        # 登录成功后会被带回 AGC。
+        # 注意：跳转回来的 URL 查询参数里仍可能带着 loginUrl=...loginAuth.html，
+        # 所以只能看 hostname + path，不能对整条 URL 做 "loginAuth not in url" 判断。
+        if is_on_agc(url):
+            await self._finish_success("已返回 AGC，登录态已保存")
+            return
         if time.time() - self.started_at > LOGIN_TIMEOUT:
             self.state = "failed"
             self.message = "登录超时（5 分钟），请重新发起"

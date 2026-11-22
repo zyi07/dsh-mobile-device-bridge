@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "DSH 华为账号登录态助手",
+  "version": "1.0.0",
+  "description": "在你已登录华为开发者账号的浏览器里，把 AGC 登录态发送给本机 DSH 插件，用于自动签名安装 HAP。",
+  "permissions": ["cookies", "tabs"],
+  "host_permissions": [
+    "https://*.huawei.com/*",
+    "http://127.0.0.1:3080/*",
+    "http://localhost:3080/*"
+  ],
+  "action": {
+    "default_title": "发送华为登录态给 DSH",
+    "default_popup": "popup.html"
+  },
+  "background": { "service_worker": "background.js" }
+}

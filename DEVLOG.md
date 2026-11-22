@@ -840,3 +840,28 @@ HTTP 100 后直接断开。虽然已把 push/install 上限放宽到 128MiB，�
 Cookie 仍然自动抓取，后续 AGC 自动化不受影响。
 
 构建标记 r75
+
+## 2026-11-22 18:45 - 改成本机浏览器登录 + 扩展转发登录态（r76）
+
+**用户指出：** 服务端弹不出浏览器，登录必须在本机浏览器做。
+
+**技术约束（说明白）：**
+- 本机浏览器登录后，Cookie 在 `developer.huawei.com` 域下，我们的页面因**同源策略**读不到；
+  直接从页面调 AGC 接口也会被 **CORS** 拦。所以必须有一个运行在浏览器里的组件替我们读。
+
+**方案：写一个浏览器扩展（MV3），装进用户自己的浏览器**
+- `extension/`：manifest + popup + background
+- 用户在**自己浏览器里原生登录**（密码 / 短信 / 扫码 / 滑块，随便）
+- 点扩展图标 →「发送登录态给 DSH」→ 扩展用 `chrome.cookies` 读取华为域 Cookie，
+  POST 到 `http://127.0.0.1:3080/mbridge/agc/cookie`
+- DSH 地址可在扩展里配置（万一不是 127.0.0.1）
+- 宿主：`POST /mbridge/agc/cookie`（写入 `~/.dsh/agc-session.json`，0600）、
+  `GET /mbridge/agc/extension.zip`（浏览器直接下载，无需传输文件）
+
+**顺带修掉扫码一直等待的两个 bug：**
+1. `poll()` 用 `"loginAuth" not in url` 判断——但回跳 URL 的**查询参数里仍带着** `loginUrl=...loginAuth.html`，
+   判定永远为假 → 抽成 `is_on_agc(url)`，只看 hostname + path
+2. `_after_submit()` 里判断写反（登录成功后反而跳过成功分支）→ 统一用 `is_on_agc()`
+
+**实测：** 扩展 zip 下载 200（3,254 字节，4 个文件）；模拟上报后
+`/agc/session` 返回 `present:true, cookieCount:2`；验证后已删除测试数据。

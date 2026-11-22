@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font: 13px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; width: 320px; margin: 0; padding: 14px; color: #e5e7eb; background: #111827; }
+    h3 { margin: 0 0 8px; font-size: 14px; }
+    p { margin: 6px 0; color: #9ca3af; }
+    button { width: 100%; margin-top: 10px; padding: 9px 12px; border: 0; border-radius: 8px; background: #3b82f6; color: #fff; font-size: 13px; cursor: pointer; }
+    button:disabled { background: #374151; cursor: default; }
+    #msg { margin-top: 10px; white-space: pre-wrap; }
+    .ok { color: #4ade80; }
+    .err { color: #f87171; }
+  </style>
+</head>
+<body>
+  <h3>华为账号登录态 → DSH</h3>
+  <p>先在浏览器里正常登录 <b>developer.huawei.com</b>（密码、短信、扫码都可以），再点下面的按钮。</p>
+  <a href="https://developer.huawei.com/consumer/cn/service/josp/agc/index.html" target="_blank">打开 AGC 登录页</a>
+  <label style="display:block;margin-top:10px;color:#9ca3af">DSH 地址
+    <input id="endpoint" style="width:100%;margin-top:4px;padding:6px;border-radius:6px;border:1px solid #374151;background:#1f2937;color:#e5e7eb" />
+  </label>
+  <button id="send">发送登录态给 DSH</button>
+  <div id="msg"></div>
+  <script src="popup.js"></script>
+</body>
+</html>
