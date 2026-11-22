@@ -693,3 +693,27 @@ INFO ← 通道关闭 side=device  ← 我把它当成了本次命令的结束 �
   几乎无声的 AudioContext（gain=5e-5, 40Hz），显著延缓标签页冻结
 - 宿主 `BROWSER_STALE_MS` 8s → **75s**，提示改为「把标签页切到前台」（后台节流是浏览器行为）
 - 构建标记 r67
+
+## 2026-11-22 12:45 - 实现文件 push/pull + HAP 安装（shell+base64 路线，已实测验证）
+
+**真机实测得到的边界（Mate 70 Pro+ / API 26）：**
+- `echo -n '<b64>' | base64 -d > path` / `>>` 追加 —— 可用
+- `base64 <path>` 读回 —— 可用（386KB 截图、80KB 文件均验证）
+- `sha256sum` 可用（用于校验）
+- **单条命令负载上限 ≈128KiB**：80KB 二进制（b64 109,228）成功，96KB（b64 131,072）失败
+  → 分块取 **64KiB**（b64 ~87KB）
+- `bm install -p <hap>` / `bm uninstall -n <bundle>` 设备侧可用（已读 help）
+- shell 身份 `uid=2000(shell)`；`/data/local/tmp` 可写；`/storage/media`、`/data/app` 无权限
+- 设备 UDID：`<DEVICE_UDID>`（HAP 调试签名的必要前提）
+
+**新增代码：**
+- `src-client/hdc/files.js`：`pushFile` / `pullFile` / `sha256Remote` /
+  `installHap`（含 9568xxx 错误码翻译）/ `uninstallBundle`
+- `main.js`：`runJob` 支持 `push` / `pull` / `install` / `uninstall`（仅鸿蒙通道）
+- `index.js`：新增 loopback 路由 `/mbridge/{push,pull,install,uninstall}`，
+  实测全部注册成功（返回参数校验 400 而非 404）
+- 构建标记 r68
+
+**待做什么：**
+- 用户刷新并重连后，我用桥实际跑一遍 push/pull 往返（sha 校验）
+- HAP 安装需要用户提供**已签名**且 Profile 含上述 UDID 的包

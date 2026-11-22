@@ -149,6 +149,54 @@ export function apply(ctx) {
             return;
           }
 
+          // ---- 文件传输与安装（鸿蒙走 shell+base64，已真机实测）----
+          if (path === ROUTE_PREFIX + '/push' && req.method === 'POST') {
+            const body = await readBody(req);
+            if (!body.path || !body.base64) {
+              send(res, 400, { ok: false, error: '缺少 path 或 base64' });
+              return;
+            }
+            needBrowser();
+            const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 600000, 1000), 1800000);
+            const r = await enqueue('push', { path: String(body.path), base64: String(body.base64) }, timeoutMs);
+            send(res, 200, { ok: true, device, bytes: r.bytes, chunks: r.chunks });
+            return;
+          }
+
+          if (path === ROUTE_PREFIX + '/pull' && req.method === 'POST') {
+            const body = await readBody(req);
+            if (!body.path) { send(res, 400, { ok: false, error: '缺少 path' }); return; }
+            needBrowser();
+            const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 300000, 1000), 1800000);
+            const r = await enqueue('pull', { path: String(body.path) }, timeoutMs);
+            send(res, 200, { ok: true, device, bytes: r.bytes, base64: r.base64 });
+            return;
+          }
+
+          if (path === ROUTE_PREFIX + '/install' && req.method === 'POST') {
+            const body = await readBody(req);
+            if (!body.base64) { send(res, 400, { ok: false, error: '缺少 base64（HAP 内容）' }); return; }
+            needBrowser();
+            const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 900000, 1000), 1800000);
+            const r = await enqueue('install', {
+              filename: String(body.filename || 'bundle.hap'),
+              base64: String(body.base64),
+              replace: !!body.replace,
+            }, timeoutMs);
+            send(res, 200, { ok: true, device, output: r.output });
+            return;
+          }
+
+          if (path === ROUTE_PREFIX + '/uninstall' && req.method === 'POST') {
+            const body = await readBody(req);
+            if (!body.bundle) { send(res, 400, { ok: false, error: '缺少 bundle' }); return; }
+            needBrowser();
+            const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 120000, 1000), 600000);
+            const r = await enqueue('uninstall', { bundle: String(body.bundle) }, timeoutMs);
+            send(res, 200, { ok: true, device, output: r.output });
+            return;
+          }
+
           if (path === ROUTE_PREFIX + '/screenshot' && req.method === 'POST') {
             const body = await readBody(req);
             needBrowser();
@@ -170,7 +218,8 @@ export function apply(ctx) {
 
           send(res, 404, {
             ok: false,
-            error: '未知路径。可用：GET /mobile-bridge/status, POST /mobile-bridge/exec, POST /mobile-bridge/screenshot',
+            error: '未知路径。可用：GET /mobile-bridge/status；POST /mobile-bridge/exec | screenshot'
+              + ' | push | pull | install | uninstall',
           });
         } catch (e) {
           send(res, 500, { ok: false, error: String(e && e.message ? e.message : e) });

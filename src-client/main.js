@@ -4,9 +4,10 @@ import { AdbDaemonWebUsbDeviceManager } from '@yume-chan/adb-daemon-webusb';
 import AdbWebCredentialStore from '@yume-chan/adb-credential-web';
 import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
 import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } from './hdc/session.js';
+import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote } from './hdc/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r67';
+const BUILD_TAG = 'r68';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -410,6 +411,13 @@ async function runShellText(adb, cmd) {
   return '$ ' + cmd + '\n' + text;
 }
 
+function fromBase64(b64) {
+  const bin = atob(String(b64 || ''));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) { out[i] = bin.charCodeAt(i); }
+  return out;
+}
+
 function toBase64(bytes) {
   let s = '';
   const chunk = 0x8000;
@@ -447,6 +455,37 @@ async function runJob(job) {
         return { ok: false, error: `截图过大（${shot.bytes.length} 字节），未回传` };
       }
       return { ok: true, base64: toBase64(shot.bytes), mime: shot.mime };
+    }
+    if (job.kind === 'push' || job.kind === 'pull' || job.kind === 'install' || job.kind === 'uninstall') {
+      if (STATE.kind !== 'hdc' || !STATE.hdc) {
+        return { ok: false, error: '文件传输/安装目前只支持 HarmonyOS 通道（Android 侧待接入 Tango sync）' };
+      }
+      const log = (m) => pushHdcLog('INFO', m);
+      if (job.kind === 'push') {
+        const bytes = fromBase64(job.data.base64);
+        log(`开始上传 ${bytes.length} 字节 → ${job.data.path}`);
+        const r = await pushFile(STATE.hdc, job.data.path, bytes, { log });
+        if (stale()) { return { ok: false, error: '连接已切换，任务作废' }; }
+        return { ok: true, bytes: r.bytes, chunks: r.chunks };
+      }
+      if (job.kind === 'pull') {
+        log(`开始下载 ${job.data.path}`);
+        const r = await pullFile(STATE.hdc, job.data.path, { log });
+        if (stale()) { return { ok: false, error: '连接已切换，任务作废' }; }
+        return { ok: true, bytes: r.bytes.length, base64: toBase64(r.bytes) };
+      }
+      if (job.kind === 'install') {
+        const bytes = fromBase64(job.data.base64);
+        log(`开始安装 ${job.data.filename}（${bytes.length} 字节）`);
+        const r = await installHap(STATE.hdc, {
+          bytes, filename: job.data.filename, replace: !!job.data.replace,
+        }, { log });
+        return { ok: true, output: r.output };
+      }
+      if (job.kind === 'uninstall') {
+        const out = await uninstallBundle(STATE.hdc, job.data.bundle);
+        return { ok: true, output: out };
+      }
     }
     return { ok: false, error: '未知任务类型 ' + job.kind };
   } catch (e) {
