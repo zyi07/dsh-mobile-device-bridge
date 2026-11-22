@@ -28,8 +28,8 @@ import time
 CHROME = os.environ.get("AGC_CHROME", "/usr/bin/chromium-browser")
 AGC_URL = "https://developer.huawei.com/consumer/cn/service/josp/agc/index.html"
 COOKIE_FILE = os.environ.get("AGC_COOKIE_FILE", "/root/.dsh/agc-session.json")
-QR_MAX_AGE = 90          # 秒，超时就重新截一张
-LOGIN_TIMEOUT = 300      # 秒，超时判定失败
+QR_MAX_AGE = 55          # 秒，超时就重新截一张（华为二维码约 2 分钟失效）
+LOGIN_TIMEOUT = 480      # 秒，超时判定失败（8 分钟）
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -47,7 +47,8 @@ def is_on_agc(url: str) -> bool:
         return False
     host = (parts.hostname or "").lower()
     path = (parts.path or "").lower()
-    return host.endswith("developer.huawei.com") and "loginAuth" not in path
+    # 注意：path 已小写，必须用小写字面量比较（之前用驼峰 loginAuth 永远匹配不上）
+    return host.endswith("developer.huawei.com") and "loginauth" not in path
 
 
 class LoginSession:
@@ -64,6 +65,8 @@ class LoginSession:
         self.account = ""
         self.mode = "qr"          # qr | pwd
         self.need_code = False    # 是否需要短信验证码
+        self._ticker_task = None
+        self.phase = "waiting"    # waiting | scanned | expired（仅扫码模式）
         self.loop = None
 
     async def start(self, mode="qr", force=False):
@@ -110,6 +113,8 @@ class LoginSession:
             pass
         self.started_at = time.time()
         self.state = "waiting"
+        if self._ticker_task is None or self._ticker_task.done():
+            self._ticker_task = asyncio.create_task(self.ticker())
         ok = await self._capture_qr()
         if not ok:
             self.message = (self.message or "") + "（可点「刷新二维码」重试）" 
@@ -343,6 +348,30 @@ class LoginSession:
         self.message = message or "登录成功"
         self.account = ""
 
+    async def _page_phase(self):
+        """读页面文案判断扫码阶段（实测文案：扫码成功 / 请在手机上确认 / 已失效）"""
+        try:
+            body = await self.page.evaluate(
+                "() => (document.body && document.body.innerText) || ''")
+        except Exception:
+            return "waiting"
+        if any(k in body for k in ("已失效", "已过期", "二维码已过期", "点击刷新",
+                                   "刷新二维码", "失效", "过期")):
+            return "expired"
+        if "扫码成功" in body or "请在手机上确认" in body or "已扫描" in body:
+            return "scanned"
+        return "waiting"
+
+    async def ticker(self):
+        """后台定时检查：自动刷新二维码、检测扫码/过期，不依赖前端轮询"""
+        while True:
+            await asyncio.sleep(12)
+            try:
+                if self.state == "waiting":
+                    await self.poll()
+            except Exception as e:
+                self.message = f"后台检查异常: {str(e)[:100]}"
+
     async def poll(self):
         if self.state in ("success", "failed", "need_code", "need_captcha"):
             return
@@ -361,10 +390,29 @@ class LoginSession:
             self.state = "failed"
             self.message = "登录超时（5 分钟），请重新发起"
             return
-        if time.time() - self.qr_at > QR_MAX_AGE:
+        # 阶段判定：让用户知道"已扫码，在手机上确认"
+        phase = await self._page_phase()
+        self.phase = phase
+        if phase == "expired":
+            # 过期后：先尝试点页面上的刷新，再重截
+            if time.time() - self.qr_at > 3:
+                try:
+                    for sel in ("text=点击刷新", "text=刷新二维码", ".hwid-qrcode-refresh"):
+                        loc = self.page.locator(sel).first
+                        if await loc.count() > 0:
+                            await loc.click(timeout=3000)
+                            await self.page.wait_for_timeout(1500)
+                            break
+                except Exception:
+                    pass
+                await self._capture_qr()
+        elif time.time() - self.qr_at > QR_MAX_AGE:
             await self._capture_qr()
 
     async def close(self):
+        if self._ticker_task:
+            self._ticker_task.cancel()
+            self._ticker_task = None
         for obj, fn in ((self.ctx, "close"), (self.browser, "close"), (self.pw, "stop")):
             try:
                 if obj:
@@ -375,12 +423,14 @@ class LoginSession:
 
     def snapshot(self, with_qr=False):
         out = {"ok": True, "state": self.state, "message": self.message, "mode": self.mode,
-               "needCode": self.need_code}
+               "needCode": self.need_code, "phase": self.phase}
         if self.page:
             out["url"] = self.page.url[:160]
         if with_qr and self.qr_b64:
             out["qr"] = self.qr_b64
-            out["qrAge"] = int(time.time() - self.qr_at)
+            age = int(time.time() - self.qr_at)
+            out["qrAge"] = age
+            out["qrLeft"] = max(0, 110 - age)     # 华为二维码约 2 分钟有效，这里给保守值
         if self.state == "success":
             out["cookieFile"] = COOKIE_FILE
             try:

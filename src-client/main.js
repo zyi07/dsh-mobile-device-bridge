@@ -7,7 +7,7 @@ import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } f
 import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChunkAt } from './hdc/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r76';
+const BUILD_TAG = 'r77';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -175,6 +175,8 @@ function startAgcPolling() {
         qr: d.qr || STATE.agc.qr,
         message: d.message || '',
         cookieCount: d.cookieCount,
+        phase: d.phase || 'waiting',
+        qrLeft: d.qrLeft,
       };
     } catch { /* 忽略单次失败 */ }
   }, 3000);
@@ -1067,123 +1069,16 @@ function MobileBridgeSection(props) {
         h('button', { className: 'mb-btn', onClick: agcStartLogin }, t('agcLogin')),
         h('button', { className: 'mb-btn', onClick: agcClearSession }, t('agcLogout')),
       ),
-      // 方式一：本机浏览器登录（扩展转发登录态）
-      h('div', { style: { marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '10px' } },
-        h('div', { className: 'mb-note', style: { fontWeight: 600 } }, t('agcExtTitle')),
-        h('div', { className: 'mb-note', style: { marginTop: '6px', lineHeight: 1.7 } }, t('agcExtHint')),
-        h('div', { className: 'mb-row', style: { marginTop: '8px' } },
-          h('a', {
-            className: 'mb-btn',
-            href: AGC_API + '/extension.zip',
-            download: 'dsh-agc-helper.zip',
-            style: { textDecoration: 'none', display: 'inline-block' },
-          }, t('agcExtDownload')),
-          h('button', { className: 'mb-btn', style: { marginLeft: '8px' }, onClick: agcCheckSession }, t('agcCheck')),
-        ),
-      ),
-
-      // 账号密码登录
-      h('div', { style: { marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '10px' } },
-        h('div', { className: 'mb-note', style: { fontWeight: 600 } }, '方式二：' + t('agcPwdTitle')),
-        h('input', {
-          className: 'mb-input',
-          placeholder: t('agcAccount'),
-          spellCheck: false,
-          value: agcAccount,
-          onChange: (ev) => setAgcAccount(ev.target.value),
-          style: { width: '100%', marginTop: '6px' },
-        }),
-        h('input', {
-          className: 'mb-input',
-          type: 'password',
-          placeholder: t('agcPassword'),
-          value: agcPassword,
-          onChange: (ev) => setAgcPassword(ev.target.value),
-          style: { width: '100%', marginTop: '6px' },
-        }),
-        h('button', {
-          className: 'mb-btn',
-          style: { marginTop: '8px' },
-          disabled: !agcAccount || !agcPassword,
-          onClick: () => agcPasswordLogin(agcAccount, agcPassword),
-        }, t('agcPwdSubmit')),
-        h('div', { className: 'mb-note', style: { marginTop: '6px' } }, t('agcPwdHint')),
-      ),
-
-      agc.state === 'need_captcha'
-        ? h('div', { className: 'mb-err', style: { marginTop: '8px' } },
-            '华为要求完成滑块验证：在下面的画面上按住滑块往右拖即可完成登录')
-        : null,
-      // 遥控画面（滑块验证 / 人工介入）
-      h('div', { style: { marginTop: '10px' } },
-        h('button', {
-          className: 'mb-btn',
-          onClick: () => { startAgcViewLoop(); agcRefreshView(); },
-        }, t('agcManualBtn')),
-        t('agcViewHint') ? h('div', { className: 'mb-note', style: { marginTop: '6px' } }, t('agcViewHint')) : null,
-        STATE.agcView
-          ? h('img', {
-              src: 'data:image/png;base64,' + STATE.agcView.image,
-              style: {
-                display: 'block', marginTop: '8px', width: '100%', maxWidth: '620px',
-                borderRadius: '6px', cursor: 'crosshair', userSelect: 'none',
-              },
-              draggable: false,
-              onMouseDown: (ev) => {
-                const rect = ev.currentTarget.getBoundingClientRect();
-                STATE.agcDrag = {
-                  sx: ev.clientX - rect.left, sy: ev.clientY - rect.top, rect,
-                  vw: STATE.agcView.width, vh: STATE.agcView.height,
-                };
-              },
-              onMouseUp: (ev) => {
-                const d = STATE.agcDrag;
-                if (!d || !STATE.agcView) { return; }
-                const rect = ev.currentTarget.getBoundingClientRect();
-                const ex = ev.clientX - rect.left;
-                const ey = ev.clientY - rect.top;
-                const kx = STATE.agcView.width / rect.width;
-                const ky = STATE.agcView.height / rect.height;
-                const moved = Math.hypot(ex - d.sx, ey - d.sy);
-                STATE.agcDrag = null;
-                if (moved < 6) {
-                  agcAct({ type: 'click', x: d.sx * kx, y: d.sy * ky });
-                } else {
-                  agcAct({ type: 'drag', x1: d.sx * kx, y1: d.sy * ky, x2: ex * kx, y2: ey * ky });
-                }
-                setTimeout(() => agcRefreshView(), 700);
-              },
-            })
-          : null,
-      ),
-
-      // 短信验证码
-      agc.state === 'need_code'
-        ? h('div', { style: { marginTop: '10px' } },
-            h('div', { className: 'mb-note', style: { fontWeight: 600 } }, t('agcCodeTitle')),
-            h('div', { className: 'mb-note' }, agc.message || ''),
-            h('input', {
-              className: 'mb-input',
-              placeholder: '6 位数字验证码',
-              value: agcCode,
-              onChange: (ev) => setAgcCode(ev.target.value),
-              style: { width: '160px', marginTop: '6px' },
-            }),
-            h('button', {
-              className: 'mb-btn',
-              style: { marginLeft: '8px' },
-              disabled: !agcCode,
-              onClick: () => agcSubmitCode(agcCode),
-            }, t('agcCodeSubmit')),
-          )
-        : null,
-
       agc.state === 'loading'
         ? h('div', { className: 'mb-note', style: { marginTop: '8px' } }, agc.message || '正在打开…')
         : null,
       agc.state === 'waiting'
         ? h('div', { style: { marginTop: '10px' } },
-            h('div', { className: 'mb-note' }, agc.message || t('agcWaiting')),
+            h('div', { className: 'mb-note' },
+              (agc.phase === 'scanned' ? '✅ 已扫码，请在手机上点「确认登录」'
+                : agc.phase === 'expired' ? '二维码已过期，正在自动刷新…'
+                : (agc.message || t('agcWaiting')))
+              + (typeof agc.qrLeft === 'number' ? `（约 ${agc.qrLeft} 秒后自动刷新）` : '')),
             agc.qr
               ? h('img', {
                   src: 'data:image/png;base64,' + agc.qr,
