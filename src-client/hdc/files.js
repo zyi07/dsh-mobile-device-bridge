@@ -78,13 +78,15 @@ export async function pushFile(session, remotePath, bytes, opts = {}) {
     const end = Math.min(off + CHUNK_SIZE, total);
     const slice = bytes.subarray(off, end);
     const b64 = bytesToBase64(slice);
-    const op = off === 0 ? '>' : '>>';
-    const cmd = `echo -n '${b64}' | base64 -d ${op} ${path}`;
+    // 用 dd 写到**精确偏移**（bs=块大小, seek=块序号, conv=notrunc）：
+    // 这样即使同一条命令因为重试被执行两次，也只是覆盖同一区域，不会数据翻倍。
+    const idx = off / CHUNK_SIZE;
+    const cmd = `echo -n '${b64}' | base64 -d | dd of=${path} bs=${CHUNK_SIZE} seek=${idx} conv=notrunc status=none`;
     // 安全阀：命令长度必须低于实测上限
     if (cmd.length > 120 * 1024) {
       throw new Error(`内部错误：单条命令 ${cmd.length} 字符，超过实测上限 128KiB`);
     }
-    await session.shell(cmd, { timeoutMs: 60000, attempts: 2 });
+    await session.shell(cmd, { timeoutMs: 60000, attempts: 2, retryOnEmpty: false });
     chunks += 1;
     if (onProgress) { onProgress(end, total); }
     if (log) { log(`上传 ${Math.round((end / total) * 100)}%（${end}/${total} 字节）`); }

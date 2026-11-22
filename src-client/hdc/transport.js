@@ -603,19 +603,23 @@ export class HdcSession {
    * 执行一条命令。返回 { text, codes }。
    * 依据抓包：一条命令 = 1 个输出帧 + 1 个关闭帧。
    */
-  async shell(text, { timeoutMs = 20000, attempts = 3, retryDelayMs = 1200 } = {}) {
+  async shell(text, { timeoutMs = 20000, attempts = 3, retryDelayMs = 1200, retryOnEmpty = false } = {}) {
     if (!this.authorized) { throw new Error('尚未完成 AUTH'); }
     let last = null;
     for (let i = 1; i <= attempts; i++) {
       this.ensureAlive();
       last = await this.shellOnce(text, timeoutMs);
-      if (last.text !== '') { return last; }
+      // 关键：**空输出不等于失败**。echo/base64 -d 这类命令正常就是没有输出。
+      // 只有"完全没收到设备关闭帧"（真超时）才重试；否则重试会让命令被执行两次
+      // ——对 `>>` 追加写就是数据翻倍（真机上复现过：512KB 写成 983KB）。
+      const ok = last.closed || (retryOnEmpty && last.text !== '');
+      if (ok) { return last; }
       if (i < attempts) {
-        this.t.emit('INFO', `命令无输出（第 ${i}/${attempts} 次），${retryDelayMs}ms 后换通道重试：${text}`);
+        this.t.emit('INFO', `命令无应答（第 ${i}/${attempts} 次），${retryDelayMs}ms 后换通道重试：${text}`);
         await sleep(retryDelayMs);
       }
     }
-    this.t.emit('INFO', `命令始终无输出：${text}`);
+    this.t.emit('INFO', `命令无应答：${text}`);
     return last;
   }
 
@@ -673,7 +677,7 @@ export class HdcSession {
         });
       } catch { /* ignore */ }
     }
-    return { text: out, closedEmpty: out === '' };
+    return { text: out, closedEmpty: out === '', closed: sawDeviceClose };
   }
 
   async close() {

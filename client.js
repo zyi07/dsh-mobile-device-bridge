@@ -6628,19 +6628,23 @@ class HdcSession {
    * 执行一条命令。返回 { text, codes }。
    * 依据抓包：一条命令 = 1 个输出帧 + 1 个关闭帧。
    */
-  async shell(text, { timeoutMs = 20000, attempts = 3, retryDelayMs = 1200 } = {}) {
+  async shell(text, { timeoutMs = 20000, attempts = 3, retryDelayMs = 1200, retryOnEmpty = false } = {}) {
     if (!this.authorized) { throw new Error('尚未完成 AUTH'); }
     let last = null;
     for (let i = 1; i <= attempts; i++) {
       this.ensureAlive();
       last = await this.shellOnce(text, timeoutMs);
-      if (last.text !== '') { return last; }
+      // 关键：**空输出不等于失败**。echo/base64 -d 这类命令正常就是没有输出。
+      // 只有"完全没收到设备关闭帧"（真超时）才重试；否则重试会让命令被执行两次
+      // ——对 `>>` 追加写就是数据翻倍（真机上复现过：512KB 写成 983KB）。
+      const ok = last.closed || (retryOnEmpty && last.text !== '');
+      if (ok) { return last; }
       if (i < attempts) {
-        this.t.emit('INFO', `命令无输出（第 ${i}/${attempts} 次），${retryDelayMs}ms 后换通道重试：${text}`);
+        this.t.emit('INFO', `命令无应答（第 ${i}/${attempts} 次），${retryDelayMs}ms 后换通道重试：${text}`);
         await sleep$1(retryDelayMs);
       }
     }
-    this.t.emit('INFO', `命令始终无输出：${text}`);
+    this.t.emit('INFO', `命令无应答：${text}`);
     return last;
   }
 
@@ -6698,7 +6702,7 @@ class HdcSession {
         });
       } catch { /* ignore */ }
     }
-    return { text: out, closedEmpty: out === '' };
+    return { text: out, closedEmpty: out === '', closed: sawDeviceClose };
   }
 
   async close() {
@@ -6864,13 +6868,15 @@ async function pushFile(session, remotePath, bytes, opts = {}) {
     const end = Math.min(off + CHUNK_SIZE, total);
     const slice = bytes.subarray(off, end);
     const b64 = bytesToBase64(slice);
-    const op = off === 0 ? '>' : '>>';
-    const cmd = `echo -n '${b64}' | base64 -d ${op} ${path}`;
+    // 用 dd 写到**精确偏移**（bs=块大小, seek=块序号, conv=notrunc）：
+    // 这样即使同一条命令因为重试被执行两次，也只是覆盖同一区域，不会数据翻倍。
+    const idx = off / CHUNK_SIZE;
+    const cmd = `echo -n '${b64}' | base64 -d | dd of=${path} bs=${CHUNK_SIZE} seek=${idx} conv=notrunc status=none`;
     // 安全阀：命令长度必须低于实测上限
     if (cmd.length > 120 * 1024) {
       throw new Error(`内部错误：单条命令 ${cmd.length} 字符，超过实测上限 128KiB`);
     }
-    await session.shell(cmd, { timeoutMs: 60000, attempts: 2 });
+    await session.shell(cmd, { timeoutMs: 60000, attempts: 2, retryOnEmpty: false });
     chunks += 1;
     if (onProgress) { onProgress(end, total); }
     if (log) { log(`上传 ${Math.round((end / total) * 100)}%（${end}/${total} 字节）`); }
@@ -6972,7 +6978,7 @@ async function uninstallBundle(session, bundleName) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r68';
+const BUILD_TAG = 'r69';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -7069,6 +7075,32 @@ function startKeepAlive() {
     STATE.keepAlive = { ctx, osc };
     pushHdcLog('INFO', '已启用后台保活（阻止标签页被冻结）');
   } catch { /* 不支持就算了 */ }
+}
+
+/**
+ * USB 掉线自愈：WebUSB 的 transfer 抛错后句柄即失效，此时用 getDevices() 取已授权设备
+ * 重新走一遍连接（密钥已保存，通常无需上机确认）。
+ */
+async function tryReconnectHdc() {
+  if (typeof navigator === 'undefined' || !navigator.usb) { return false; }
+  try {
+    const list = await navigator.usb.getDevices();
+    const dev = list.find((d) => d.vendorId === 0x12d1);
+    if (!dev) { return false; }
+    pushHdcLog('INFO', 'USB 句柄失效，尝试自动重连');
+    const next = await withConnectLock(async () => {
+      const token = ++STATE.connectToken;
+      if (STATE.hdc) { try { STATE.hdc.abort('掉线重连'); } catch { /* ignore */ } STATE.hdc = null; }
+      return connectHarmony(dev, token);
+    });
+    STATE.info = next;
+    STATE.kind = 'hdc';
+    pushHdcLog('INFO', '自动重连成功');
+    return true;
+  } catch (e) {
+    pushHdcLog('INFO', `自动重连失败：${(e && e.message) || e}`);
+    return false;
+  }
 }
 
 /** 把 HDC 日志送到宿主写文件，便于直接读取而不必截屏。 */
@@ -7450,7 +7482,31 @@ async function runJob(job) {
     }
     return { ok: false, error: '未知任务类型 ' + job.kind };
   } catch (e) {
-    return { ok: false, error: String(e && e.message ? e.message : e) };
+    const msg = String(e && e.message ? e.message : e);
+    // USB 掉线：句柄已失效，尝试自动重连后重试一次同一个任务
+    if (/transferIn|transferOut|USBDevice|disconnect|lost|No device/i.test(msg)
+        && STATE.kind === 'hdc' && !stale()) {
+      const ok = await tryReconnectHdc();
+      if (ok) {
+        try {
+          if (job.kind === 'shell') {
+            return { ok: true, output: await execShell(job.data.cmd) };
+          }
+          if (job.kind === 'pull') {
+            const r = await pullFile(STATE.hdc, job.data.path, { log: (m) => pushHdcLog('INFO', m) });
+            return { ok: true, bytes: r.bytes.length, base64: toBase64(r.bytes) };
+          }
+          if (job.kind === 'push') {
+            const bytes = fromBase64(job.data.base64);
+            const r = await pushFile(STATE.hdc, job.data.path, bytes, { log: (m) => pushHdcLog('INFO', m) });
+            return { ok: true, bytes: r.bytes, chunks: r.chunks };
+          }
+        } catch (e2) {
+          return { ok: false, error: `重连后重试仍失败：${String(e2 && e2.message ? e2.message : e2)}` };
+        }
+      }
+    }
+    return { ok: false, error: msg };
   }
 }
 

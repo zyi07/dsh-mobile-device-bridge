@@ -151,7 +151,7 @@ export function apply(ctx) {
 
           // ---- 文件传输与安装（鸿蒙走 shell+base64，已真机实测）----
           if (path === ROUTE_PREFIX + '/push' && req.method === 'POST') {
-            const body = await readBody(req);
+            const body = await readBody(req, 128 << 20);   // 允许大文件（base64 膨胀 ~1.33x）
             if (!body.path || !body.base64) {
               send(res, 400, { ok: false, error: '缺少 path 或 base64' });
               return;
@@ -174,7 +174,7 @@ export function apply(ctx) {
           }
 
           if (path === ROUTE_PREFIX + '/install' && req.method === 'POST') {
-            const body = await readBody(req);
+            const body = await readBody(req, 128 << 20);   // HAP 安装包可能几十 MB
             if (!body.base64) { send(res, 400, { ok: false, error: '缺少 base64（HAP 内容）' }); return; }
             needBrowser();
             const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 900000, 1000), 1800000);
