@@ -7,7 +7,7 @@ import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } f
 import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChunkAt } from './hdc/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r72';
+const BUILD_TAG = 'r73';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -974,11 +974,11 @@ function MobileBridgeSection(props) {
         : null,
       agc.state === 'waiting'
         ? h('div', { style: { marginTop: '10px' } },
-            h('div', { className: 'mb-note' }, t('agcWaiting')),
+            h('div', { className: 'mb-note' }, agc.message || t('agcWaiting')),
             agc.qr
               ? h('img', {
                   src: 'data:image/png;base64,' + agc.qr,
-                  style: { display: 'block', marginTop: '8px', width: '260px', borderRadius: '6px', background: '#fff' },
+                  style: { display: 'block', marginTop: '8px', width: '290px', height: '290px', borderRadius: '6px', background: '#fff' },
                 })
               : h('div', { className: 'mb-note' }, t('agcNoQr')),
             h('button', { className: 'mb-btn', style: { marginTop: '8px' }, onClick: agcStartLogin }, t('agcRefresh')),

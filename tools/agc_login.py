@@ -18,6 +18,7 @@
 
 import asyncio
 import base64
+import io
 import json
 import os
 import sys
@@ -77,10 +78,16 @@ class LoginSession:
                 wait_until="domcontentloaded")
             await self.page.get_by_text("登录", exact=True).first.click(timeout=8000)
 
-        await self.page.wait_for_timeout(5000)
+        # 等登录页真正出来（URL 变成 CAS 登录页）
+        try:
+            await self.page.wait_for_url("**/loginAuth.html**", timeout=25000)
+        except Exception:
+            pass
         self.started_at = time.time()
         self.state = "waiting"
-        await self._capture_qr()
+        ok = await self._capture_qr()
+        if not ok:
+            self.message = (self.message or "") + "（可点「刷新二维码」重试）" 
 
     async def _already_logged_in(self):
         try:
@@ -89,26 +96,52 @@ class LoginSession:
         except Exception:
             return False
 
-    async def _capture_qr(self):
-        """把登录页上的二维码单独截出来（比整页小得多，便于在面板里显示）"""
+    @staticmethod
+    def _crop_qr(png: bytes) -> bytes:
+        """从整页截图里裁出二维码区域并放大，否则缩到面板宽度后扫不出来。
+
+        布局来自实测（1280x900 视口，华为 CAS 登录页）：
+        二维码位于左侧 368..528 x 255..415。
+        """
         try:
-            for sel in ("canvas", "img[src*='qr']", ".qrcode-img", "#qrCode"):
-                loc = self.page.locator(sel).first
-                if await loc.count() > 0:
-                    png = await loc.screenshot()
-                    self.qr_b64 = base64.b64encode(png).decode()
-                    self.qr_at = time.time()
-                    return True
-        except Exception as e:
-            self.message = f"截取二维码失败: {e}"
-        # 兜底：整页截图
-        try:
-            png = await self.page.screenshot(clip={"x": 300, "y": 180, "width": 560, "height": 420})
-            self.qr_b64 = base64.b64encode(png).decode()
-            self.qr_at = time.time()
-            return True
+            from PIL import Image
+            img = Image.open(io.BytesIO(png))
+            box = (352, 240, 545, 433)          # 稍微留白
+            crop = img.crop(box).resize((580, 580), Image.LANCZOS)
+            buf = io.BytesIO()
+            crop.save(buf, format="PNG")
+            return buf.getvalue()
         except Exception:
-            return False
+            return png
+
+    @staticmethod
+    def _looks_blank(png: bytes) -> bool:
+        """空白页截图会被压得很小；二维码页通常在 10KB 以上"""
+        return len(png) < 6000
+
+    async def _capture_qr(self):
+        """等到登录页真正渲染出来再截图。
+
+        之前直接截会在页面还没画完时抓到一张纯白图（插件里表现为白屏），
+        所以这里：轮询等待 → 截图 → 检查是否空白 → 反复重试。
+        """
+        for attempt in range(1, 13):
+            if not self.page:
+                return False
+            try:
+                await self.page.wait_for_timeout(1200)
+                png = await self.page.screenshot()          # 整页：用户也能看到「短信验证码登录」等其它入口
+                if not self._looks_blank(png):
+                    self.qr_b64 = base64.b64encode(self._crop_qr(png)).decode()
+                    self.qr_at = time.time()
+                    self.message = ""
+                    return True
+                self.message = f"登录页渲染中（第 {attempt} 次），稍候…"
+            except Exception as e:
+                self.message = f"截屏失败（第 {attempt} 次）: {str(e)[:120]}"
+            await self.page.wait_for_timeout(1000)
+        self.message = "登录页一直没能渲染出来，请点「刷新二维码」重试"
+        return False
 
     async def _finish_success(self, message=""):
         cookies = await self.ctx.cookies()
