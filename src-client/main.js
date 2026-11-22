@@ -7,7 +7,7 @@ import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } f
 import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChunkAt } from './hdc/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r73';
+const BUILD_TAG = 'r75';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -70,6 +70,7 @@ const STATE = {
   hdcPending: null,   // 进行中的 HDC 会话（自动重连/手动连接都可能留下）
   keepAlive: null,    // 后台保活句柄
   agc: { state: 'idle', qr: '', message: '' },   // 华为账号登录状态
+  agcView: null,   // 遥控浏览器截图 { image, width, height }
   connection: null,   // 宿主 RPC 连接（用于把 HDC 日志送到宿主落盘）
 };
 
@@ -177,6 +178,85 @@ function startAgcPolling() {
       };
     } catch { /* 忽略单次失败 */ }
   }, 3000);
+}
+
+async function agcPasswordLogin(account, password) {
+  STATE.agc = { state: 'loading', qr: '', message: '正在提交账号密码…', mode: 'pwd' };
+  try {
+    const r = await fetch(AGC_API + '/login/password', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ account, password }),
+    });
+    const d = await r.json();
+    STATE.agc = {
+      state: d.state || (d.ok ? 'waiting' : 'failed'),
+      qr: d.qr || '',
+      message: d.message || d.error || '',
+      mode: d.mode || 'pwd',
+      cookieCount: d.cookieCount,
+    };
+    if (STATE.agc.state === 'waiting') { startAgcPolling(); }
+  } catch (e) {
+    STATE.agc = { state: 'failed', qr: '', message: String(e && e.message ? e.message : e), mode: 'pwd' };
+  }
+}
+
+async function agcSubmitCode(code) {
+  try {
+    const r = await fetch(AGC_API + '/login/code', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    const d = await r.json();
+    STATE.agc = {
+      state: d.state || (d.ok ? 'waiting' : 'failed'),
+      qr: d.qr || '',
+      message: d.message || d.error || '',
+      cookieCount: d.cookieCount,
+    };
+    if (STATE.agc.state === 'waiting') { startAgcPolling(); }
+  } catch (e) {
+    STATE.agc = { ...STATE.agc, state: 'failed', message: String(e && e.message ? e.message : e) };
+  }
+}
+
+/** 拉取遥控画面（登录页 / 滑块验证） */
+async function agcRefreshView() {
+  try {
+    const r = await fetch(AGC_API + '/view');
+    const d = await r.json();
+    if (d.ok) { STATE.agcView = { image: d.image, width: d.width, height: d.height, url: d.url }; }
+    else { STATE.agc.message = d.error || '画面获取失败'; }
+  } catch (e) { /* ignore */ }
+  if (STATE.agc.state === 'success') { STATE.agcView = null; }
+}
+
+/** 把插件里的鼠标动作发给宿主执行 */
+async function agcAct(action) {
+  try {
+    const r = await fetch(AGC_API + '/act', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(action),
+    });
+    const d = await r.json();
+    if (!d.ok) { STATE.agc.message = d.error || '操作失败'; }
+    else if (d.state === 'success') { STATE.agc.state = 'success'; }
+  } catch { /* ignore */ }
+}
+
+let agcViewTimer = null;
+function startAgcViewLoop() {
+  if (agcViewTimer) { return; }
+  agcRefreshView();
+  agcViewTimer = setInterval(() => {
+    if (!STATE.agcView && STATE.agc.state !== 'need_captcha' && STATE.agc.state !== 'waiting') {
+      clearInterval(agcViewTimer); agcViewTimer = null; return;
+    }
+    agcRefreshView();
+  }, 2500);
 }
 
 async function agcClearSession() {
@@ -684,6 +764,9 @@ function MobileBridgeSection(props) {
   const [out, setOut] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [copied, setCopied] = React.useState(false);
+  const [agcAccount, setAgcAccount] = React.useState('');
+  const [agcPassword, setAgcPassword] = React.useState('');
+  const [agcCode, setAgcCode] = React.useState('');
   const [usbSupported] = React.useState(
     typeof navigator !== 'undefined' && !!navigator.usb,
   );
@@ -969,6 +1052,102 @@ function MobileBridgeSection(props) {
         h('button', { className: 'mb-btn', onClick: agcStartLogin }, t('agcLogin')),
         h('button', { className: 'mb-btn', onClick: agcClearSession }, t('agcLogout')),
       ),
+      // 账号密码登录
+      h('div', { style: { marginTop: '12px', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '10px' } },
+        h('div', { className: 'mb-note', style: { fontWeight: 600 } }, t('agcPwdTitle')),
+        h('input', {
+          className: 'mb-input',
+          placeholder: t('agcAccount'),
+          spellCheck: false,
+          value: agcAccount,
+          onChange: (ev) => setAgcAccount(ev.target.value),
+          style: { width: '100%', marginTop: '6px' },
+        }),
+        h('input', {
+          className: 'mb-input',
+          type: 'password',
+          placeholder: t('agcPassword'),
+          value: agcPassword,
+          onChange: (ev) => setAgcPassword(ev.target.value),
+          style: { width: '100%', marginTop: '6px' },
+        }),
+        h('button', {
+          className: 'mb-btn',
+          style: { marginTop: '8px' },
+          disabled: !agcAccount || !agcPassword,
+          onClick: () => agcPasswordLogin(agcAccount, agcPassword),
+        }, t('agcPwdSubmit')),
+        h('div', { className: 'mb-note', style: { marginTop: '6px' } }, t('agcPwdHint')),
+      ),
+
+      agc.state === 'need_captcha'
+        ? h('div', { className: 'mb-err', style: { marginTop: '8px' } },
+            '华为要求完成滑块验证：在下面的画面上按住滑块往右拖即可完成登录')
+        : null,
+      // 遥控画面（滑块验证 / 人工介入）
+      h('div', { style: { marginTop: '10px' } },
+        h('button', {
+          className: 'mb-btn',
+          onClick: () => { startAgcViewLoop(); agcRefreshView(); },
+        }, t('agcManualBtn')),
+        t('agcViewHint') ? h('div', { className: 'mb-note', style: { marginTop: '6px' } }, t('agcViewHint')) : null,
+        STATE.agcView
+          ? h('img', {
+              src: 'data:image/png;base64,' + STATE.agcView.image,
+              style: {
+                display: 'block', marginTop: '8px', width: '100%', maxWidth: '620px',
+                borderRadius: '6px', cursor: 'crosshair', userSelect: 'none',
+              },
+              draggable: false,
+              onMouseDown: (ev) => {
+                const rect = ev.currentTarget.getBoundingClientRect();
+                STATE.agcDrag = {
+                  sx: ev.clientX - rect.left, sy: ev.clientY - rect.top, rect,
+                  vw: STATE.agcView.width, vh: STATE.agcView.height,
+                };
+              },
+              onMouseUp: (ev) => {
+                const d = STATE.agcDrag;
+                if (!d || !STATE.agcView) { return; }
+                const rect = ev.currentTarget.getBoundingClientRect();
+                const ex = ev.clientX - rect.left;
+                const ey = ev.clientY - rect.top;
+                const kx = STATE.agcView.width / rect.width;
+                const ky = STATE.agcView.height / rect.height;
+                const moved = Math.hypot(ex - d.sx, ey - d.sy);
+                STATE.agcDrag = null;
+                if (moved < 6) {
+                  agcAct({ type: 'click', x: d.sx * kx, y: d.sy * ky });
+                } else {
+                  agcAct({ type: 'drag', x1: d.sx * kx, y1: d.sy * ky, x2: ex * kx, y2: ey * ky });
+                }
+                setTimeout(() => agcRefreshView(), 700);
+              },
+            })
+          : null,
+      ),
+
+      // 短信验证码
+      agc.state === 'need_code'
+        ? h('div', { style: { marginTop: '10px' } },
+            h('div', { className: 'mb-note', style: { fontWeight: 600 } }, t('agcCodeTitle')),
+            h('div', { className: 'mb-note' }, agc.message || ''),
+            h('input', {
+              className: 'mb-input',
+              placeholder: '6 位数字验证码',
+              value: agcCode,
+              onChange: (ev) => setAgcCode(ev.target.value),
+              style: { width: '160px', marginTop: '6px' },
+            }),
+            h('button', {
+              className: 'mb-btn',
+              style: { marginLeft: '8px' },
+              disabled: !agcCode,
+              onClick: () => agcSubmitCode(agcCode),
+            }, t('agcCodeSubmit')),
+          )
+        : null,
+
       agc.state === 'loading'
         ? h('div', { className: 'mb-note', style: { marginTop: '8px' } }, agc.message || '正在打开…')
         : null,
@@ -1052,6 +1231,16 @@ export function apply(ctx) {
       agcSuccess: '已登录，登录态已保存',
       agcFailed: '登录失败',
       agcNoQr: '点「开始登录」后在手机扫码',
+      agcPwdTitle: '账号密码登录',
+      agcAccount: '华为账号（手机号/邮箱）',
+      agcPassword: '密码',
+      agcPwdSubmit: '登录',
+      agcCodeTitle: '短信验证码',
+      agcCodeSubmit: '提交验证码',
+      agcPwdHint: '账号密码只在本机转发给登录进程，不写日志、不保存。若弹出滑块验证，直接在下面的画面上拖动即可。',
+      agcManual: '手动完成验证（在画面上拖动滑块 / 点击）',
+      agcManualBtn: '打开浏览器画面',
+      agcViewHint: '画面来自宿主的浏览器。拖动滑块：在图上按住并往右拖；也可以直接点击。',
       hdcKeyTitle: '密钥设置（默认已自动保存，无需操作）',
       hdcKeyReset: '重置密钥',
       hdcKeyStored: '默认会保存一把密钥并复用，授权只需做一次；只有想换密钥时才需要点重置',

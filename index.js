@@ -270,6 +270,39 @@ export function apply(ctx) {
             send(res, 200, r);
             return;
           }
+          if (path === ROUTE_PREFIX + '/agc/login/password' && req.method === 'POST') {
+            const body = await readBody(req);
+            const account = String(body.account || '').trim();
+            const password = String(body.password || '');
+            if (!account || !password) {
+              send(res, 400, { ok: false, error: '缺少 account 或 password' });
+              return;
+            }
+            // 密码只经内存传给登录进程，不写日志、不落盘
+            const r = await agcCommand(
+              'login-password ' + JSON.stringify({ account, password }), 180000);
+            send(res, 200, r);
+            return;
+          }
+          if (path === ROUTE_PREFIX + '/agc/login/code' && req.method === 'POST') {
+            const body = await readBody(req);
+            const code = String(body.code || '').trim();
+            if (!code) { send(res, 400, { ok: false, error: '缺少 code' }); return; }
+            const r = await agcCommand('login-code ' + JSON.stringify({ code }), 180000);
+            send(res, 200, r);
+            return;
+          }
+          if (path === ROUTE_PREFIX + '/agc/view' && req.method === 'GET') {
+            const r = await agcCommand('view', 60000);
+            send(res, 200, r);
+            return;
+          }
+          if (path === ROUTE_PREFIX + '/agc/act' && req.method === 'POST') {
+            const body = await readBody(req);
+            const r = await agcCommand('act ' + JSON.stringify(body), 60000);
+            send(res, 200, r);
+            return;
+          }
           if (path === ROUTE_PREFIX + '/agc/login/close' && req.method === 'POST') {
             try {
               await agcCommand('close', 30000);

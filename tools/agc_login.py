@@ -46,9 +46,12 @@ class LoginSession:
         self.qr_at = 0.0
         self.started_at = 0.0
         self.account = ""
+        self.mode = "qr"          # qr | pwd
+        self.need_code = False    # 是否需要短信验证码
         self.loop = None
 
-    async def start(self):
+    async def start(self, mode="qr"):
+        self.mode = mode
         from playwright.async_api import async_playwright
         if self.browser:
             await self.close()
@@ -89,12 +92,171 @@ class LoginSession:
         if not ok:
             self.message = (self.message or "") + "（可点「刷新二维码」重试）" 
 
+    # ---------- 账号密码登录 ----------
+    # ---------- 遥控浏览器（滑块验证由用户亲手完成）----------
+    async def view(self):
+        if not self.page:
+            return {"ok": False, "error": "登录会话未启动"}
+        try:
+            png = await self.page.screenshot()
+            vp = self.page.viewport_size or {"width": 1280, "height": 900}
+            return {"ok": True, "image": base64.b64encode(png).decode(),
+                    "width": vp["width"], "height": vp["height"], "url": self.page.url}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:200]}
+
+    async def act(self, action):
+        if not self.page:
+            return {"ok": False, "error": "登录会话未启动"}
+        kind = action.get("type")
+        try:
+            if kind == "click":
+                await self.page.mouse.click(float(action["x"]), float(action["y"]))
+            elif kind == "drag":
+                x1, y1 = float(action["x1"]), float(action["y1"])
+                x2, y2 = float(action["x2"]), float(action["y2"])
+                await self.page.mouse.move(x1, y1)
+                await self.page.mouse.down()
+                steps = 25
+                for i in range(1, steps + 1):
+                    await self.page.mouse.move(x1 + (x2 - x1) * i / steps,
+                                               y1 + (y2 - y1) * i / steps)
+                    await self.page.wait_for_timeout(12)
+                await self.page.mouse.up()
+            elif kind == "type":
+                await self.page.keyboard.type(str(action.get("text", "")))
+            elif kind == "press":
+                await self.page.keyboard.press(str(action.get("key", "Enter")))
+            else:
+                return {"ok": False, "error": f"未知动作 {kind}"}
+            await self.page.wait_for_timeout(600)
+            # 动作后顺便判定是否已经登录成功
+            if "developer.huawei.com" in self.page.url and "loginAuth" not in self.page.url:
+                if not await self._already_logged_in():
+                    await self._finish_success("登录成功（手动验证）")
+            return {"ok": True, "state": self.state, "url": self.page.url[:160],
+                    "message": self.message}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:200]}
+
+    async def submit_password(self, account, password):
+        """填账号密码并提交；不记录、不回传密码"""
+        if not self.page:
+            # 首次调用：自动拉起浏览器并进入登录页
+            await self.start(mode="pwd")
+            if self.state == "success":
+                return
+        # 如果当前不在登录页，先切过去
+        if "loginAuth" not in self.page.url:
+            await self.page.goto(
+                "https://developer.huawei.com/consumer/cn/service/josp/agc/index.html",
+                wait_until="domcontentloaded")
+            await self.page.wait_for_timeout(2500)
+            if not await self._already_logged_in():
+                await self.page.get_by_text("登录", exact=True).first.click(timeout=8000)
+            try:
+                await self.page.wait_for_url("**/loginAuth.html**", timeout=20000)
+            except Exception:
+                pass
+
+        acc = self.page.locator("input.hwid-input.userAccount").first
+        pwd = self.page.locator("input.hwid-input-pwd").first
+        await acc.wait_for(state="visible", timeout=20000)
+        await acc.fill(account)
+        await pwd.fill(password)
+        await self.page.wait_for_timeout(400)
+
+        btn = self.page.locator('div[ht="click_pwdlogin_submitLogin"]').first
+        await btn.click(timeout=15000)
+        self.started_at = time.time()
+        self.state = "waiting"
+        self.message = "已提交账号密码，等待验证…"
+        await self._after_submit()
+
+    async def _after_submit(self):
+        """提交后判定：成功 / 需要验证码 / 需要滑块 / 报错"""
+        for _ in range(20):
+            await self.page.wait_for_timeout(1500)
+            url = self.page.url
+            if "developer.huawei.com" in url and "loginAuth" not in url:
+                if not await self._already_logged_in():
+                    await self._finish_success("登录成功")
+                    return
+            # 需要短信验证码
+            code_input = self.page.locator(
+                "input[placeholder*='验证码'], input[maxlength='6'], .hwid-verify-input input")
+            try:
+                if await code_input.count() > 0 and await code_input.first.is_visible():
+                    self.need_code = True
+                    self.state = "need_code"
+                    self.message = "手机已收到验证码，请填写短信验证码"
+                    return
+            except Exception:
+                pass
+            # 滑块/图形验证
+            for sel in ("[class*='captcha']", "[class*='verify-slider']", "#captchaDiv"):
+                try:
+                    loc = self.page.locator(sel).first
+                    if await loc.count() > 0 and await loc.is_visible():
+                        self.state = "need_captcha"
+                        self.message = "需要完成滑块/图形验证，请在浏览器里手动完成（或改用扫码）"
+                        return
+                except Exception:
+                    pass
+            # 明确报错
+            for sel in (".hwid-error-tip", "[class*='error-tip']", ".hwid-error", "#errMsg"):
+                try:
+                    loc = self.page.locator(sel).first
+                    if await loc.count() > 0 and await loc.is_visible():
+                        txt = (await loc.inner_text())[:120]
+                        if txt.strip():
+                            self.state = "failed"
+                            self.message = txt.strip()
+                            return
+                except Exception:
+                    pass
+        self.state = "failed"
+        self.message = "提交后未检测到登录成功，请重试或改用扫码"
+
+    async def submit_code(self, code):
+        """填短信验证码并提交"""
+        if not self.page:
+            raise RuntimeError("登录会话未启动（请先提交账号密码）")
+        loc = self.page.locator(
+            "input[placeholder*='验证码'], input[maxlength='6'], .hwid-verify-input input").first
+        await loc.wait_for(state="visible", timeout=15000)
+        await loc.fill(code)
+        for sel in ('div[ht*="submit"]', ".hwid-login-btn", "div.normalBtn", "button[type=submit]"):
+            try:
+                b = self.page.locator(sel).first
+                if await b.count() > 0 and await b.is_visible():
+                    await b.click(timeout=8000)
+                    break
+            except Exception:
+                continue
+        await self._after_submit()
+
     async def _already_logged_in(self):
         try:
             n = await self.page.get_by_text("登录", exact=True).count()
             return n == 0
         except Exception:
             return False
+
+    async def _qr_box(self):
+        """优先用真实二维码元素的包围盒，拿不到再退回固定区域"""
+        for sel in (".hwid-qrCode-root canvas", ".hwid-qrCode-root img",
+                    ".hwid-qrcode-full-box canvas", "canvas", "img[src*='qr']"):
+            try:
+                loc = self.page.locator(sel).first
+                if await loc.count() == 0:
+                    continue
+                box = await loc.bounding_box()
+                if box and box["width"] >= 100:
+                    return (box["x"], box["y"], box["x"] + box["width"], box["y"] + box["height"])
+            except Exception:
+                continue
+        return None
 
     @staticmethod
     def _crop_qr(png: bytes) -> bytes:
@@ -161,7 +323,7 @@ class LoginSession:
         self.account = ""
 
     async def poll(self):
-        if self.state in ("success", "failed"):
+        if self.state in ("success", "failed", "need_code", "need_captcha"):
             return
         if not self.page:
             self.state = "failed"
@@ -190,7 +352,8 @@ class LoginSession:
         self.ctx = self.browser = self.pw = self.page = None
 
     def snapshot(self, with_qr=False):
-        out = {"ok": True, "state": self.state, "message": self.message}
+        out = {"ok": True, "state": self.state, "message": self.message, "mode": self.mode,
+               "needCode": self.need_code}
         if self.page:
             out["url"] = self.page.url[:160]
         if with_qr and self.qr_b64:
@@ -223,9 +386,22 @@ async def main():
         line = await reader.readline()
         if not line:
             break
-        cmd = line.decode().strip()
+        raw = line.decode().strip()
+        cmd, _, arg = raw.partition(" ")
         try:
-            if cmd == "start":
+            if cmd == "login-password":
+                params = json.loads(arg or "{}")
+                await sess.submit_password(params.get("account", ""), params.get("password", ""))
+                _emit(sess.snapshot(with_qr=False))
+            elif cmd == "view":
+                _emit(await sess.view())
+            elif cmd == "act":
+                _emit(await sess.act(json.loads(arg or "{}")))
+            elif cmd == "login-code":
+                params = json.loads(arg or "{}")
+                await sess.submit_code(params.get("code", ""))
+                _emit(sess.snapshot(with_qr=False))
+            elif cmd == "start":
                 await sess.start()
                 _emit(sess.snapshot(with_qr=True))
             elif cmd == "status":
