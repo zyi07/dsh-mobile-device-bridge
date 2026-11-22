@@ -7,7 +7,7 @@ import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } f
 import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChunkAt } from './hdc/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r88';
+const BUILD_TAG = 'r89';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -334,6 +334,22 @@ function startAgcViewLoop() {
   }, 2500);
 }
 
+/** 从宿主读取已保存的登录态（插件重载/切页后自动恢复，不需要重新登录） */
+async function agcRestoreSession() {
+  try {
+    const r = await fetch(AGC_API + '/session');
+    const d = await r.json();
+    if (d.present) {
+      STATE.agc = {
+        state: 'success', qr: '', message: '',
+        savedAt: d.savedAt, cookieCount: d.cookieCount,
+      };
+    } else if (!STATE.agc || STATE.agc.state === 'idle') {
+      STATE.agc = { state: 'idle', qr: '', message: '' };
+    }
+  } catch { /* 宿主不可达时保持原状 */ }
+}
+
 async function agcCheckSession() {
   try {
     const r = await fetch(AGC_API + '/session');
@@ -353,7 +369,9 @@ async function agcClearSession() {
   try {
     await fetch(AGC_API + '/login/close', { method: 'POST' });
   } catch { /* ignore */ }
-  STATE.agc = { state: 'idle', qr: '', message: '已清除登录态' };
+  STATE.agc = { state: 'idle', qr: '', message: '已退出登录' };
+  agcPollTimer && clearInterval(agcPollTimer);
+  agcPollTimer = null;
 }
 
 /** 把 HDC 日志送到宿主写文件，便于直接读取而不必截屏。 */
@@ -851,6 +869,84 @@ const CSS = `
 }
 `;
 
+/**
+ * 华为账号登录（独立设置页）
+ *
+ * 登录态由宿主持久化在 ~/.dsh/agc-session.json，页面挂载时自动恢复，
+ * 所以插件重载、切页、重连手机都不需要重新登录。
+ */
+function HuaweiAccountSection(props) {
+  const t = props.t;
+  const [, setTick] = React.useState(0);
+  const [copied, setCopied] = React.useState(false);
+
+  React.useEffect(() => {
+    agcRestoreSession();
+    const id = setInterval(() => setTick((n) => n + 1), 1500);
+    return () => clearInterval(id);
+  }, []);
+
+  const agc = STATE.agc || { state: 'idle' };
+  const savedAtText = agc.savedAt
+    ? new Date(agc.savedAt * 1000).toLocaleString()
+    : '';
+
+  const children = [h('style', { key: 's' }, CSS)];
+
+  children.push(h('div', { key: 'h', className: 'mb-card' },
+    h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, t('accountTitle')),
+    h('div', { className: 'mb-note', style: { lineHeight: 1.7 } }, t('accountHint')),
+
+    // 状态
+    h('div', { style: { marginTop: '10px' } },
+      agc.state === 'success'
+        ? h('div', { style: { color: '#4ade80', fontWeight: 600 } },
+            '✅ ' + t('accountStatusOk')
+            + (agc.cookieCount ? `（${agc.cookieCount} 条 Cookie）` : '')
+            + (savedAtText ? `，登录于 ${savedAtText}` : ''))
+        : h('div', { className: 'mb-note' }, t('accountStatusNone'))),
+
+    h('div', { className: 'mb-row', style: { marginTop: '10px' } },
+      h('button', { className: 'mb-btn mb-btn--primary', onClick: agcStartLogin },
+        agc.state === 'success' ? t('accountRelogin') : t('agcLogin')),
+      h('button', { className: 'mb-btn', onClick: agcClearSession }, t('agcLogout')),
+    ),
+
+    agc.state === 'loading'
+      ? h('div', { className: 'mb-note', style: { marginTop: '10px' } }, agc.message || '正在打开…')
+      : null,
+
+    agc.state === 'waiting'
+      ? h('div', { style: { marginTop: '10px' } },
+          h('div', { className: 'mb-note' },
+            (agc.phase === 'scanned' ? '✅ 已扫码，请在手机上点「确认登录」'
+              : agc.phase === 'expired' ? '二维码已过期，正在自动刷新…'
+              : (agc.message || t('agcWaiting')))
+            + (typeof agc.qrLeft === 'number' ? `（约 ${agc.qrLeft} 秒后自动刷新）` : '')),
+          (agc.qr && agc.qr.length > 2000)
+            ? h('img', {
+                src: 'data:image/png;base64,' + agc.qr,
+                style: { display: 'block', marginTop: '8px', width: '290px', height: '290px', borderRadius: '6px', background: '#fff' },
+              })
+            : h('div', { className: 'mb-note' }, t('agcNoQr')),
+          h('button', { className: 'mb-btn', style: { marginTop: '8px' }, onClick: agcStartLogin }, t('agcRefresh')),
+        )
+      : null,
+
+    agc.state === 'failed'
+      ? h('div', { className: 'mb-err', style: { marginTop: '10px' } },
+          t('agcFailed') + (agc.message ? '：' + agc.message : ''))
+      : null,
+  ));
+
+  children.push(h('div', { key: 'p', className: 'mb-card', style: { marginTop: '10px' } },
+    h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, t('accountPersistTitle')),
+    h('div', { className: 'mb-note', style: { lineHeight: 1.7 } }, t('accountPersistHint')),
+  ));
+
+  return h('div', { className: 'mb-root' }, children);
+}
+
 function MobileBridgeSection(props) {
   const t = props.t;
   const [phase, setPhase] = React.useState((STATE.adb || STATE.hdc) ? 'connected' : 'idle');
@@ -1188,43 +1284,11 @@ function MobileBridgeSection(props) {
         '包名 com.dsh.bridgeapp，已用你的调试证书签名，调试 Profile 里绑定了你这台手机（<DEVICE_UDID>）。'),
     ));
 
-    // ---- 华为账号登录（自动签名用）----
-    const agc = STATE.agc || { state: 'idle' };
-    children.push(h('details', { key: 'agc', className: 'mb-card', style: { marginTop: '10px' } },
-      h('summary', { style: { cursor: 'pointer', userSelect: 'none' } }, t('agcTitle')),
-      h('div', { className: 'mb-note', style: { marginTop: '6px', lineHeight: 1.6 } }, t('agcHint')),
-      h('div', { className: 'mb-row', style: { marginTop: '8px' } },
-        h('button', { className: 'mb-btn', onClick: agcStartLogin }, t('agcLogin')),
-        h('button', { className: 'mb-btn', onClick: agcClearSession }, t('agcLogout')),
-      ),
-      agc.state === 'loading'
-        ? h('div', { className: 'mb-note', style: { marginTop: '8px' } }, agc.message || '正在打开…')
-        : null,
-      agc.state === 'waiting'
-        ? h('div', { style: { marginTop: '10px' } },
-            h('div', { className: 'mb-note' },
-              (agc.phase === 'scanned' ? '✅ 已扫码，请在手机上点「确认登录」'
-                : agc.phase === 'expired' ? '二维码已过期，正在自动刷新…'
-                : (agc.message || t('agcWaiting')))
-              + (typeof agc.qrLeft === 'number' ? `（约 ${agc.qrLeft} 秒后自动刷新）` : '')),
-            (agc.qr && agc.qr.length > 2000)
-              ? h('img', {
-                  src: 'data:image/png;base64,' + agc.qr,
-                  style: { display: 'block', marginTop: '8px', width: '290px', height: '290px', borderRadius: '6px', background: '#fff' },
-                })
-              : h('div', { className: 'mb-note' }, t('agcNoQr')),
-            h('button', { className: 'mb-btn', style: { marginTop: '8px' }, onClick: agcStartLogin }, t('agcRefresh')),
-          )
-        : null,
-      agc.state === 'success'
-        ? h('div', { className: 'mb-note', style: { marginTop: '8px', color: '#4ade80' } },
-            t('agcSuccess') + (agc.cookieCount ? `（${agc.cookieCount} 条 Cookie）` : ''))
-        : null,
-      agc.state === 'failed'
-        ? h('div', { className: 'mb-err', style: { marginTop: '8px' } },
-            t('agcFailed') + (agc.message ? '：' + agc.message : ''))
-        : null,
-    ));
+    // 华为账号已独立成「华为账号」设置页，这里只放一句指引
+    children.push(h('div', { key: 'agclink', className: 'mb-note', style: { marginTop: '10px' } },
+      (STATE.agc && STATE.agc.state === 'success')
+        ? '✅ 华为账号已登录（可在侧边栏「华为账号」页管理），签名安装无需再登录。'
+        : '需要自动签名安装 HAP？请到侧边栏「华为账号」页扫码登录（一次登录长期有效）。'));
 
     children.push(h('div', { key: 'sh', className: 'mb-row' },
       h('input', {
@@ -1275,6 +1339,14 @@ export function apply(ctx) {
       diagnose: '诊断',
       hintAdb: '连接会跟着页面保留：关掉设置、切到别页再回来都不用重连；刷新页面则会断开，之后会自动尝试恢复。需要在手机上开启「USB 调试」，首次连接时手机会弹出授权提示。同一时刻只能有一个程序占用 USB，请先停掉本机的 adb server、Android Studio、scrcpy 等。',
       hintHdc: '连接会跟着页面保留：关掉设置、切到别页再回来都不用重连；刷新页面则会断开。需要在手机上开启「USB 调试」，并且本机不能有 hdc / DevEco Studio 正在占用设备（连接前先执行 hdc kill）。首次连接需要在手机上点「允许 / 始终信任」；之后同一把密钥不会再询问。连接建立后才可用命令与截图。',
+      navAccount: '华为账号',
+      accountTitle: '华为账号登录',
+      accountHint: '用手机「控制中心 → 扫一扫」扫码登录华为开发者账号。登录后本插件可以自动为你申请调试证书、生成调试 Profile 并给 HAP 签名——整个过程不需要你手动准备任何签名材料。',
+      accountStatusOk: '已登录',
+      accountStatusNone: '未登录',
+      accountRelogin: '重新登录',
+      accountPersistTitle: '登录态如何保存',
+      accountPersistHint: '登录态保存在本机（~/.dsh/agc-session.json，权限 600），不会上传到任何地方。\n插件重载、切换页面、重连手机都不需要重新登录；只有你点「退出登录」或华为侧会话失效时才需要再扫一次。',
       agcTitle: '华为账号登录（用于自动签名安装）',
       agcHint: '用手机「控制中心 → 扫一扫」扫码登录华为开发者账号。登录态只保存在本机，用于自动申请调试证书与 Profile；不需要你手工准备已签名的 HAP。',
       agcLogin: '开始登录（显示二维码）',
@@ -1336,6 +1408,14 @@ export function apply(ctx) {
       diagnose: 'Diagnose',
       hintAdb: 'The connection survives closing settings or switching pages; reloading the page drops it and it will try to reconnect. Enable USB debugging on the phone and confirm the authorization prompt on first connect. Only one program may hold the USB device, so stop the adb server, Android Studio and scrcpy first.',
       hintHdc: 'The connection survives closing settings or switching pages; reloading drops it. Enable USB debugging on the phone and make sure no hdc / DevEco Studio is holding the device (run hdc kill first). On first connect tap Allow / Always trust on the phone; the saved key is not asked for again. Commands and screenshots work once connected.',
+      navAccount: 'Huawei account',
+      accountTitle: 'Huawei account sign-in',
+      accountHint: 'Scan the QR with your phone (Control Center > Scan) to sign in. Once signed in, the plugin requests a debug certificate, mints a debug profile and signs HAPs for you - no signing material needed on your side.',
+      accountStatusOk: 'Signed in',
+      accountStatusNone: 'Not signed in',
+      accountRelogin: 'Sign in again',
+      accountPersistTitle: 'How the session is kept',
+      accountPersistHint: 'The session is stored on this machine (~/.dsh/agc-session.json, mode 600) and is never uploaded.\nReloading the plugin, switching pages or reconnecting the phone does not require another sign-in; only signing out or an expiry on the Huawei side does.',
       agcTitle: 'Huawei account sign-in (for automatic signing)',
       agcHint: 'Scan the QR with your phone (Control Center > Scan) to sign in. The session stays on this machine and is used to request a debug certificate and profile; you do not need to supply a pre-signed HAP.',
       agcLogin: 'Start sign-in (show QR)',
@@ -1407,6 +1487,15 @@ export function apply(ctx) {
       if (stopBridge) { stopBridge(); }
     };
   }, 'mobile-bridge: host bridge');
+
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'huawei-account',
+    order: 31,
+    label: () => t('navAccount'),
+    locale: NS,
+    inject: () => ({ t }),
+  }, HuaweiAccountSection));
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',

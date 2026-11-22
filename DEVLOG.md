@@ -1138,3 +1138,21 @@ Must be handling a user gesture to show a permission request
 **ID 签名链路（无需用户提供任何签名材料）：**
 生成 ECC 密钥 → CSR → AGC 申请调试证书 → 创建应用 → 创建调试 Profile（绑定本机 UDID）
 → 下载 .cer/.p7b → 等长替换 HAP 包名 → hap-sign-tool 签名 → verify-app → 分片推送 → bm install。
+
+## 2026-11-22 21:45 - 华为账号登录独立成页 + 登录态自动恢复（r89）
+
+**用户要求：** 华为账号登录单独做页面；登录信息持久化，不要每次连手机都重登。
+
+**登录态本来就已经持久化**（宿主写 `~/.dsh/agc-session.json`，权限 600，
+当前 34 条 Cookie、登录于 13:13），问题是**插件重载后前端不读它**，UI 从 idle 开始，
+看起来像要重登。
+
+**改动：**
+- 新增独立设置页 `settings.section` id=`huawei-account`，order=31（排在「移动设备」上面），
+  组件 `HuaweiAccountSection`：登录状态 / 二维码 / 开始登录 / 重新登录 / 退出登录
+- 新增 `agcRestoreSession()`：页面挂载时读 `/mbridge/agc/session` 恢复已登录状态；
+  登录成功、退出登录时同步刷新
+- 「移动设备」页移除原 AGC 折叠区，改为一行指引（已登录时显示 ✅ 并提示去「华为账号」页管理）
+- 新增文案：navAccount / accountTitle / accountHint / accountStatusOk / accountStatusNone /
+  accountRelogin / accountPersistTitle / accountPersistHint（中英）
+- 构建 r89
