@@ -35,6 +35,12 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
 
+def _to_png(img) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def is_on_agc(url: str) -> bool:
     """是否已经回到 AGC 页面。
 
@@ -285,6 +291,40 @@ class LoginSession:
         return None
 
     @staticmethod
+    def _normalize_qr(png: bytes) -> bytes:
+        """裁到二维码主体并放大到 580×580。
+
+        元素截图里二维码下方常带着说明文字，直接放大既难看也可能扫偏。
+        这里用深色像素的包围盒定位二维码本体，再按正方形裁剪放大。
+        """
+        try:
+            from PIL import Image
+            img = Image.open(io.BytesIO(png)).convert("L")
+            w, h = img.size
+            px = img.load()
+            min_x, min_y, max_x, max_y = w, h, -1, -1
+            for y in range(0, h, 2):
+                for x in range(0, w, 2):
+                    if px[x, y] < 100:
+                        if x < min_x: min_x = x
+                        if x > max_x: max_x = x
+                        if y < min_y: min_y = y
+                        if y > max_y: max_y = y
+            if max_x <= min_x or max_y <= min_y:
+                return png
+            side = max(max_x - min_x, max_y - min_y) + 8
+            cx = (min_x + max_x) // 2
+            cy = (min_y + max_y) // 2
+            x1 = max(0, cx - side // 2)
+            y1 = max(0, cy - side // 2)
+            x2 = min(w, x1 + side)
+            y2 = min(h, y1 + side)
+            square = img.crop((x1, y1, x2, y2)).convert("RGB")
+            return _to_png(square.resize((580, 580), Image.LANCZOS))
+        except Exception:
+            return png
+
+    @staticmethod
     def _crop_qr(png: bytes) -> bytes:
         """从整页截图里裁出二维码区域并放大，否则缩到面板宽度后扫不出来。
 
@@ -303,33 +343,86 @@ class LoginSession:
             return png
 
     @staticmethod
+    def _dark_ratio(png: bytes) -> float:
+        """返回深色像素占比。二维码约 20%~45%；纯白/纯灰接近 0。
+
+        这是唯一可靠的判据：之前用"整页截图大小"判断，整页有文字所以不空白，
+        但裁给用户的那块是白的 —— 于是面板显示白板。
+        """
+        try:
+            from PIL import Image
+            im = Image.open(io.BytesIO(png)).convert("L")
+            data = list(im.getdata())
+            if not data:
+                return 0.0
+            return sum(1 for v in data if v < 128) / len(data)
+        except Exception:
+            return 0.0
+
+    @staticmethod
     def _looks_blank(png: bytes) -> bool:
-        """空白页截图会被压得很小；二维码页通常在 10KB 以上"""
-        return len(png) < 6000
+        return LoginSession._dark_ratio(png) < 0.03
 
     async def _capture_qr(self):
-        """等到登录页真正渲染出来再截图。
+        """取一张**确认含二维码**的图。
 
-        之前直接截会在页面还没画完时抓到一张纯白图（插件里表现为白屏），
-        所以这里：轮询等待 → 截图 → 检查是否空白 → 反复重试。
+        验收标准：黑色像素占比 >= 5%。整页大小、文件大小都不能作为判据。
         """
-        for attempt in range(1, 13):
+        for attempt in range(1, 15):
             if not self.page:
                 return False
             try:
-                await self.page.wait_for_timeout(1200)
-                png = await self.page.screenshot()          # 整页：用户也能看到「短信验证码登录」等其它入口
-                if not self._looks_blank(png):
-                    self.qr_page_expired = (await self._page_phase()) == "expired"
-                    self.qr_b64 = base64.b64encode(self._crop_qr(png)).decode()
-                    self.qr_at = time.time()
-                    self.message = ""
-                    return True
-                self.message = f"登录页渲染中（第 {attempt} 次），稍候…"
+                # ① 先直接截二维码元素（最可靠）
+                for sel in (".hwid-qrCode-root", ".hwid-qrcode-full-box",
+                            ".hwid-qrCode-root canvas", "canvas", "img[src*='qr']"):
+                    try:
+                        loc = self.page.locator(sel).first
+                        if await loc.count() == 0:
+                            continue
+                        if not await loc.is_visible():
+                            continue
+                        png = await loc.screenshot(timeout=6000)
+                        png = self._normalize_qr(png)
+                        ratio = self._dark_ratio(png)
+                        if ratio >= 0.05:
+                            self.qr_b64 = base64.b64encode(png).decode()
+                            self.qr_at = time.time()
+                            self.qr_page_expired = False
+                            self.message = ""
+                            return True
+                    except Exception:
+                        continue
+                # ② 退而求其次：整页截图 + 二维码元素包围盒裁剪
+                box = await self._qr_box()
+                png = await self.page.screenshot()
+                if box:
+                    try:
+                        from PIL import Image
+                        img = Image.open(io.BytesIO(png))
+                        x1, y1, x2, y2 = [int(v) for v in box]
+                        crop = img.crop((x1, y1, x2, y2))
+                        crop = crop.resize((580, 580), Image.LANCZOS)
+                        buf = io.BytesIO(); crop.save(buf, format="PNG")
+                        cand = buf.getvalue()
+                        if self._dark_ratio(cand) >= 0.05:
+                            self.qr_b64 = base64.b64encode(cand).decode()
+                            self.qr_at = time.time()
+                            self.qr_page_expired = False
+                            self.message = ""
+                            return True
+                    except Exception:
+                        pass
+                self.message = f"二维码还没渲染好（第 {attempt} 次），稍候…"
             except Exception as e:
-                self.message = f"截屏失败（第 {attempt} 次）: {str(e)[:120]}"
-            await self.page.wait_for_timeout(1000)
-        self.message = "登录页一直没能渲染出来，请点「刷新二维码」重试"
+                self.message = f"截图失败（第 {attempt} 次）: {str(e)[:100]}"
+            # 每 3 次尝试点一下刷新，逼页面重绘
+            if attempt % 3 == 0:
+                await self._click_refresh()
+            await self.page.wait_for_timeout(1200)
+        # 彻底拿不到：清空图片（绝不把白板发给前端），但**不判死会话**，
+        # 保持等待状态，让后台 ticker 继续重试；用户也可以点「开始登录」重开。
+        self.qr_b64 = ""
+        self.message = "二维码暂时取不到，正在后台重试…（也可点「开始登录」重开）"
         return False
 
     async def _finish_success(self, message=""):

@@ -57,7 +57,7 @@ def make_session(url, text=""):
     s.ctx = StubCtx()
     s.state = "waiting"
     s.started_at = time.time()
-    s.qr_at = 0
+    s.qr_at = time.time()
     s.qr_b64 = "AAAA"
     return s
 
@@ -110,6 +110,41 @@ async def main():
         cond = got == want
         print(f"5. is_on_agc({url[:52]}…) = {got} 期望 {want}  {'✓' if cond else '✗'}")
         ok = ok and cond
+
+    # 6) 深色像素判据（防止再出现"白板当二维码"）
+    try:
+        from PIL import Image
+        import io as _io
+
+        def png_of(img):
+            b = _io.BytesIO(); img.save(b, format="PNG"); return b.getvalue()
+
+        white = png_of(Image.new("RGB", (200, 200), (255, 255, 255)))
+        ratio_w = agc_login.LoginSession._dark_ratio(white)
+        cond = ratio_w < 0.03
+        print(f"6. 纯白图深色占比={ratio_w:.1%} → 判为空白  {'✓' if cond else '✗'}")
+        ok = ok and cond
+
+        # 合成二维码样式（黑白棋盘）
+        qr = Image.new("RGB", (400, 400), (255, 255, 255))
+        px = qr.load()
+        for y in range(400):
+            for x in range(400):
+                if ((x // 10) + (y // 10)) % 2 == 0:
+                    px[x, y] = (0, 0, 0)
+        ratio_q = agc_login.LoginSession._dark_ratio(png_of(qr))
+        cond = ratio_q >= 0.05
+        print(f"7. 棋盘图深色占比={ratio_q:.1%} → 判为有效  {'✓' if cond else '✗'}")
+        ok = ok and cond
+
+        # 灰底（过期遮罩那种浅灰）也不应被判为有效二维码
+        grey = png_of(Image.new("RGB", (200, 200), (235, 235, 235)))
+        ratio_g = agc_login.LoginSession._dark_ratio(grey)
+        cond = ratio_g < 0.03
+        print(f"8. 浅灰遮罩深色占比={ratio_g:.1%} → 判为空白  {'✓' if cond else '✗'}")
+        ok = ok and cond
+    except ImportError:
+        print("6-8. 跳过（无 PIL）")
 
     print("\nRESULT:", "全部通过" if ok else "有失败项")
     return 0 if ok else 1

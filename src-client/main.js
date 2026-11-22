@@ -7,7 +7,7 @@ import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } f
 import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChunkAt } from './hdc/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r77';
+const BUILD_TAG = 'r78';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -1079,7 +1079,7 @@ function MobileBridgeSection(props) {
                 : agc.phase === 'expired' ? '二维码已过期，正在自动刷新…'
                 : (agc.message || t('agcWaiting')))
               + (typeof agc.qrLeft === 'number' ? `（约 ${agc.qrLeft} 秒后自动刷新）` : '')),
-            agc.qr
+            (agc.qr && agc.qr.length > 2000)
               ? h('img', {
                   src: 'data:image/png;base64,' + agc.qr,
                   style: { display: 'block', marginTop: '8px', width: '290px', height: '290px', borderRadius: '6px', background: '#fff' },
