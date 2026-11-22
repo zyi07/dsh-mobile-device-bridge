@@ -586,8 +586,9 @@ export class HdcSession {
   }
 
   startHeartbeat() {
-    if (!this.heartbeatMs || this.hbTimer) { return; }
+    if (!this.heartbeatMs || this.hbTimer || this.aborted || !this.authorized) { return; }
     this.hbTimer = setInterval(() => {
+      if (this.aborted) { this.stopHeartbeat(); return; }
       const frame = buildHeartbeatFrame({ sessionId: this.sessionId, count: this.hbCount++ });
       this.t.writeFrame({ sessionId: this.sessionId, frame }).catch(() => { /* 心跳失败不致命 */ });
     }, this.heartbeatMs);

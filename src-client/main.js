@@ -6,7 +6,7 @@ import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
 import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } from './hdc/session.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r64';
+const BUILD_TAG = 'r66';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -66,6 +66,7 @@ const STATE = {
   hdcKeyText: '',     // 保留字段（已不再暴露 UI）
   connectToken: 0,    // 每次连接自增；旧任务发现令牌变化即放弃
   connectInFlight: null,  // 串行化：同一时刻只允许一个连接流程
+  hdcPending: null,   // 进行中的 HDC 会话（自动重连/手动连接都可能留下）
   connection: null,   // 宿主 RPC 连接（用于把 HDC 日志送到宿主落盘）
 };
 
@@ -178,6 +179,12 @@ async function detach() {
 async function connectHarmony(device, token) {
   const attempt = async (dev) => {
     checkToken();
+    // 作废任何残留会话（包括自动重连留下的），否则它的心跳会一直写进端点，
+    // 干扰本次握手（真机日志里出现过"认证前就发心跳"的现象）。
+    if (STATE.hdcPending && STATE.hdcPending !== STATE.hdc) {
+      try { STATE.hdcPending.abort('被新连接取代'); } catch { /* ignore */ }
+    }
+    STATE.hdcPending = null;
     STATE.log = [];
     pushHdcLog('INFO', `=== 尝试连接开始 build=${BUILD_TAG} serial=${JSON.stringify(dev.serialNumber || '')} ===`);
     await flushHdcLog();          // 先落一条，确保宿主侧能看到"这次确实跑了"
@@ -246,7 +253,16 @@ async function connectHarmonyInner(t, device) {
     keyPair,
     publicKeyPem,
   });
-  const authText = await session.connect();
+  STATE.hdcPending = session;
+  let authText;
+  try {
+    authText = await session.connect();
+  } catch (e) {
+    try { session.abort('连接失败'); } catch { /* ignore */ }
+    if (STATE.hdcPending === session) { STATE.hdcPending = null; }
+    throw e;
+  }
+  if (STATE.hdcPending === session) { STATE.hdcPending = null; }
 
   // 机型/系统：多个候选参数依次尝试（不同版本参数名不同），并过滤掉报错行
   const probe = async (keys) => {
@@ -263,23 +279,29 @@ async function connectHarmonyInner(t, device) {
   };
   // 连接刚建立时设备侧 shell 服务可能还没就绪（抓包显示真 hdc 会等 ~4 秒），
   // 所以这里先预热 + 多轮重试，直到取到机型为止。
+  // 注意：探测失败**不应**导致连接失败——模型/API 只是展示信息。
   let model = '';
   let api = '';
   let online = '';
-  for (let round = 1; round <= 5; round++) {
-    if (STATE.connectToken !== token) { break; }
-    model = await probe(['const.product.model', 'const.product.name', 'const.product.brand']);
-    if (model) {
-      api = await probe(['const.ohos.apiversion', 'const.product.software.version']);
-      online = await probe(['const.product.devicetype']);
-      break;
+  try {
+    for (let round = 1; round <= 5; round++) {
+      if (STATE.connectToken !== token) { break; }
+      model = await probe(['const.product.model', 'const.product.name', 'const.product.brand']);
+      if (model) {
+        api = await probe(['const.ohos.apiversion', 'const.product.software.version']);
+        online = await probe(['const.product.devicetype']);
+        break;
+      }
+      t.emit('INFO', `机型探测第 ${round}/5 轮未取到，1.5 秒后重试`);
+      await new Promise((r) => setTimeout(r, 1500));
     }
-    t.emit('INFO', `机型探测第 ${round}/5 轮未取到，1.5 秒后重试`);
-    await new Promise((r) => setTimeout(r, 1500));
+  } catch (e) {
+    t.emit('INFO', `设备信息探测失败（不影响连接）：${(e && e.message) || e}`);
   }
   t.emit('INFO', `探测结果 机型=${model || '?'} API=${api || '?'} 类型=${online || '?'}`);
 
   STATE.hdc = session;
+  STATE.hdcPending = null;
   STATE.device = device;
   STATE.kind = 'hdc';
   STATE.info = {
