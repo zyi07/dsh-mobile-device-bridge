@@ -1108,3 +1108,33 @@ Must be handling a user gesture to show a permission request
 **同时改进（r88）：** 连接失败时分析接口 class，若不是 0xff，直接给出
 「手机 USB 接口不是 HDC 调试接口，请把 USB 连接方式改成传输文件」的精准提示，
 而不是笼统的 Access denied。
+
+## 2026-11-22 21:35 - 【里程碑】WebUSB + ID 签名 + 侧载安装 全链路真机打通
+
+**用户确认连接成功后，实测完整侧载流程：**
+
+| 步骤 | 结果 |
+|---|---|
+| WebUSB + HDC 连接 | ✅ 机型 `PLA-AL10`、UDID 与注册设备一致 |
+| 命令通道 | ✅ `param get` / `bm get --udid` 正常 |
+| 推送 0.62MB（最小包） | ✅ 4.5s，sha256 一致，10 块 |
+| **`bm install -p`** | ✅ **`install bundle successfully.`** |
+| 推送 5.3MB（arm64 完整） | ✅ 分片续传 168s，sha256 一致 |
+| **`bm install -r`** | ✅ **`install bundle successfully.`** |
+| 启动应用 | ✅ `aa start` 成功，**截图显示应用原生界面已渲染** |
+| 应用身份 | ✅ `appIdentifier: 6917622501194387981` = AGC 创建的应用 ID |
+
+**截图证据：** 应用界面（搜索框/首页/我的）正常显示；中间报错是该 App **自身后端域名解析失败**，
+与签名/安装无关。
+
+**解决的关键技术问题：**
+1. **连接 Access denied 真因**：手机 USB 模式降到 HID(0x6) 接口，
+   HDC vendor 接口(0xff) 未暴露 → 改成「传输文件」后恢复。
+   插件现在会自动上报 USB 状态并给出精准提示。
+2. **大包传输断线**：单次连续传输 >20~30 秒必断（0.62MB/5s 成功，5.3MB/34s 断，9.86MB/61s 断）。
+   解法：**分片推送 + 断点续传**（`tools/agc_resume_push.py`，每块 64KB 独立 HTTP，
+   `dd` 精确偏移天然幂等，失败可重跑续传）。
+
+**ID 签名链路（无需用户提供任何签名材料）：**
+生成 ECC 密钥 → CSR → AGC 申请调试证书 → 创建应用 → 创建调试 Profile（绑定本机 UDID）
+→ 下载 .cer/.p7b → 等长替换 HAP 包名 → hap-sign-tool 签名 → verify-app → 分片推送 → bm install。
