@@ -990,3 +990,20 @@ Cookie 仍然自动抓取，后续 AGC 自动化不受影响。
 
 **下一步：** 要么实现 HDC 原生文件传输协议（CMD_FILE_*，调研已做，需抓包），
 要么先接受慢速推送（约 1MB/分钟）完成安装验证。
+
+## 2026-11-22 20:45 - 独占错误（open/Access denied）排查与自愈（r79/r80）
+
+**现象：** 用户 `hdc kill` 后仍报 `open 失败（设备被独占）… Access denied`。
+
+**分析：** 错误发生在 **open** 阶段（不是 claim）。
+- 若是 hdc/DevEco 占用 → open 被拒
+- 也可能是**上一次会话（10MB 推送超时）没释放句柄**，Chrome 仍持有该设备
+- 用户只 kill 了 hdc，但 DevEco Studio 会重启 hdc；或 Chrome 自己还占着
+
+**代码修复（真 bug）：**
+失败重试的正则 `/claim|Unable|NetworkError|disconnect|in use|busy/` **不含 `open` 与 `Access denied`**，
+所以 open 阶段的独占错误从来不触发自愈。已改为 3 次重试，每次用 `getDevices()` 换全新引用。
+
+**提示文案更新（r79）：** 按可能性排序——①Chrome 自身占用（完全退出 Chrome）
+②DevEco Studio（结束 devecostudio64.exe/idea64.exe/hdc.exe）
+③物理拔插；并给出 PowerShell 查占用命令。

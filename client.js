@@ -6887,7 +6887,8 @@ async function writeChunkAt(session, remotePath, chunkBytes, chunkSize, index, o
   if (cmd.length > 120 * 1024) {
     throw new Error(`内部错误：单块命令 ${cmd.length} 字符，超过实测上限 128KiB`);
   }
-  await session.shell(cmd, { timeoutMs: 60000, attempts: 2, retryOnEmpty: false });
+  // dd 写精确偏移，天然幂等；重试只会拖慢（等待设备关闭帧会被误判失败）
+  await session.shell(cmd, { timeoutMs: 90000, attempts: 1 });
   if (log) { log(`写入第 ${index} 块（${chunkBytes.length} 字节 @ ${index * chunkSize}）`); }
   return { bytes: chunkBytes.length };
 }
@@ -6930,7 +6931,7 @@ async function pushFile(session, remotePath, bytes, opts = {}) {
     if (cmd.length > 120 * 1024) {
       throw new Error(`内部错误：单条命令 ${cmd.length} 字符，超过实测上限 128KiB`);
     }
-    await session.shell(cmd, { timeoutMs: 60000, attempts: 2, retryOnEmpty: false });
+    await session.shell(cmd, { timeoutMs: 90000, attempts: 1 });
     chunks += 1;
     if (onProgress) { onProgress(end, total); }
     if (log) { log(`上传 ${Math.round((end / total) * 100)}%（${end}/${total} 字节）`); }
@@ -7049,7 +7050,7 @@ async function uninstallBundle(session, bundleName) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r78';
+const BUILD_TAG = 'r80';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -7346,18 +7347,27 @@ async function connectHarmony(device, token) {
     }
   };
 
-  try {
-    return await attempt(device);
-  } catch (e) {
-    const raw = String(e && e.message ? e.message : e);
-    // 只在"接口/枚举"类错误上重试一次：手机授权后可能重新枚举，旧句柄已失效
-    if (!/claim|Unable|NetworkError|disconnect|in use|busy/i.test(raw)) { throw e; }
-    await new Promise((r) => setTimeout(r, 700));
-    const list = await navigator.usb.getDevices().catch(() => []);
-    const fresh = list.find((d) => d.vendorId === 0x12d1);
-    if (!fresh) { throw e; }
-    return await attempt(fresh);
+  // 失败自愈：换一个全新的 USBDevice 引用重试（旧引用在 close 后可能失效）
+  const RETRYABLE = /claim|Unable|NetworkError|disconnect|in use|busy|open|Access denied|SecurityError|not allowed/i;
+  let lastErr = null;
+  let dev = device;
+  for (let i = 0; i < 3; i++) {
+    try {
+      return await attempt(dev);
+    } catch (e) {
+      lastErr = e;
+      const raw = String(e && e.message ? e.message : e);
+      if (!RETRYABLE.test(raw)) { throw e; }
+      if (i === 2) { break; }
+      pushHdcLog('INFO', `连接失败，${800 * (i + 1)}ms 后换新的设备引用重试（第 ${i + 2}/3 次）`);
+      await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+      const list = await navigator.usb.getDevices().catch(() => []);
+      const fresh = list.find((d) => d.vendorId === 0x12d1
+        && (!device.serialNumber || d.serialNumber === device.serialNumber));
+      if (fresh) { dev = fresh; }
+    }
   }
+  throw lastErr;
 }
 
 async function connectHarmonyInner(t, device) {
@@ -8132,7 +8142,7 @@ function apply(ctx) {
       reconnectingHint: '检测到之前授权过的设备，正在用已保存的 RSA 密钥自动重连，不需要再点按钮。',
       noWebusb: '当前浏览器不支持 WebUSB。请使用 Chrome 或 Edge 打开本页面。',
       errBusy: '手机已被另一个程序占用（这一步是浏览器拿到了 USB 设备，但接口被抢占）。\n请在你自己电脑上依次做：\n1) 关掉 adb 服务：adb kill-server（Windows 任务管理器里结束 adb.exe）\n2) 退出 Android Studio、scrcpy、华为 HiSuite、各类手机助手\n3) 拔掉数据线再插回去，保持屏幕解锁\n4) 回到这里重新点「连接设备」',
-      errExclusive: '这台电脑上的 hdc server 正独占着设备，Chrome 连 open 都做不到（真机实测：hdc server 在跑时 libusb_open 返回 -3 ACCESS，接口本身是正常的 WINUSB）。\n\n请按顺序做：\n1) 在 Windows 上执行（绝对路径）：\n   & "C:\\Program Files\\Huawei\\DevEco Studio\\sdk\\default\\openharmony\\toolchains\\hdc.exe" kill\n2) 关闭 DevEco Studio（它开着会自动把 hdc 拉起来）\n3) 执行完之后【不要再运行任何 hdc 命令】，立刻回来点「连接设备」\n\n注意：任何一条 hdc 命令（包括 hdc list targets）都会让 server 重新抢占设备。',
+      errExclusive: '设备在 open 阶段被拒绝（Access denied），说明有程序正独占它。注意：错误发生在 open 而不是 claim，通常**不是驱动问题**，而是有进程/页面握着这个设备。\n\n按可能性从高到低排查：\n\n【最常见】Chrome 自己还占着（上一次连接没释放，比如大文件传输超时后）\n  → 完全退出 Chrome（关掉所有窗口；任务管理器确认 chrome.exe 全部结束），再重新打开本页面\n\n【其次】DevEco Studio（内置 hdc，会不停重启 server）\n  → 完全退出 DevEco Studio（不是关窗口，是在任务管理器结束 devecostudio64.exe / idea64.exe / hdc.exe）\n\n【兜底】物理重置\n  → 拔掉 USB 线，等 3 秒再插回去，保持手机解锁\n\n查占用（Windows PowerShell）：\n  Get-Process chrome,devecostudio64,idea64,hdc,hdc_std,HiSuite -ErrorAction SilentlyContinue | Select Name,Id\n\n做完【不要运行任何 hdc 命令】，立刻点「连接设备」。',
       errHdcBusy: '浏览器无法接管 HDC 接口——几乎总是因为这台电脑上的 hdc server 正占着它（DevEco Studio 会自动拉起 hdc）。\n请在该电脑上依次做：\n1) 执行 hdc kill（或在任务管理器里结束 hdc.exe）\n2) 关闭 DevEco Studio / 手机助手 / HiSuite\n3) 拔掉数据线再插回去，保持屏幕解锁\n4) 回到这里重新点「连接设备」\n若 hdc kill 后仍失败，才是驱动问题（该 HDC 接口未绑定 WinUSB）。',
       errDriver: '浏览器无法接管该 USB 接口，通常是手机在 Windows 上绑的是 MTP/厂商驱动而不是 WinUSB。\n请在电脑上安装 Google Android USB Driver，或在设备管理器里把该设备的驱动改为 WinUSB，然后重新插拔。',
       errGesture: '浏览器要求由点击触发设备选择，请直接点「连接设备」按钮，不要通过脚本调用。',
@@ -8179,7 +8189,7 @@ function apply(ctx) {
       reconnectingHint: 'A previously authorized device was found; reconnecting with the stored RSA key, no click needed.',
       noWebusb: 'This browser has no WebUSB support. Open this page in Chrome or Edge.',
       errBusy: 'The phone is held by another program: the browser reached the USB device but could not claim the interface.\nOn your own computer:\n1) stop the adb server: adb kill-server (or end adb.exe in Task Manager)\n2) quit Android Studio, scrcpy, HiSuite and phone-assistant tools\n3) unplug and replug the cable, keep the screen unlocked\n4) click "Connect device" again',
-      errExclusive: 'The hdc server on this computer holds the device exclusively, so Chrome cannot even open it. (Measured on the real device: with the hdc server running, libusb_open returns -3 ACCESS, while the interface itself is a healthy WINUSB node.)\n\nDo this in order:\n1) On Windows run:\n   & "C:\\Program Files\\Huawei\\DevEco Studio\\sdk\\default\\openharmony\\toolchains\\hdc.exe" kill\n2) Quit DevEco Studio (it restarts hdc automatically)\n3) After that do NOT run any hdc command; click "Connect device" right away\n\nAny hdc command (even hdc list targets) lets the server grab the device again.',
+      errExclusive: 'The device was refused at open (Access denied), so some program holds it exclusively. The failure is at open rather than claim, which usually means a process or page still owns it, not a driver problem.\n\nCheck in this order:\n\n[most likely] Chrome itself still holds it (a previous connection was never released, e.g. after a large transfer timed out)\n  -> Quit Chrome completely (close every window; confirm no chrome.exe remains in Task Manager), then reopen this page\n\n[next] DevEco Studio (bundles hdc and keeps restarting the server)\n  -> Quit it fully (end devecostudio64.exe / idea64.exe / hdc.exe in Task Manager, not just close the window)\n\n[last resort] Physical reset\n  -> Unplug the USB cable, wait 3 seconds, plug it back in, keep the phone unlocked\n\nFind the holder (Windows PowerShell):\n  Get-Process chrome,devecostudio64,idea64,hdc,hdc_std,HiSuite -ErrorAction SilentlyContinue | Select Name,Id\n\nAfter that do NOT run any hdc command; click "Connect device" immediately.',
       errHdcBusy: 'The browser cannot claim the HDC interface. This is almost always because the hdc server on this computer is holding it (DevEco Studio starts hdc automatically).\nOn that computer:\n1) run hdc kill (or end hdc.exe in Task Manager)\n2) quit DevEco Studio / HiSuite / phone-assistant tools\n3) unplug and replug the cable, keep the screen unlocked\n4) click "Connect device" again\nIf it still fails after hdc kill, then it is a driver problem (HDC interface not bound to WinUSB).',
       errDriver: 'The browser cannot take over this USB interface. On Windows the phone is usually bound to the MTP/vendor driver instead of WinUSB.\nInstall the Google Android USB Driver, or switch the device driver to WinUSB in Device Manager, then replug.',
       errGesture: 'The browser requires a click to open the device chooser. Press the "Connect device" button directly.',
