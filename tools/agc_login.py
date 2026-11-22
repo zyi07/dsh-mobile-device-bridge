@@ -193,16 +193,17 @@ class LoginSession:
                     return
             except Exception:
                 pass
-            # 滑块/图形验证
-            for sel in ("[class*='captcha']", "[class*='verify-slider']", "#captchaDiv"):
-                try:
-                    loc = self.page.locator(sel).first
-                    if await loc.count() > 0 and await loc.is_visible():
-                        self.state = "need_captcha"
-                        self.message = "需要完成滑块/图形验证，请在浏览器里手动完成（或改用扫码）"
-                        return
-                except Exception:
-                    pass
+            # 滑块/图形验证：按真实文案判定（实测弹窗为「请完成安全验证」+「拖动滑块」）
+            try:
+                body = await self.page.evaluate(
+                    "() => (document.body && document.body.innerText) || ''")
+                if ("请完成安全验证" in body or "拖动滑块" in body
+                        or "向右拖动" in body or "安全验证" in body):
+                    self.state = "need_captcha"
+                    self.message = "华为要求完成滑块验证：在下方画面上按住滑块往右拖即可"
+                    return
+            except Exception:
+                pass
             # 明确报错
             for sel in (".hwid-error-tip", "[class*='error-tip']", ".hwid-error", "#errMsg"):
                 try:
