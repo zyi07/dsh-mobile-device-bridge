@@ -91,7 +91,8 @@ export async function writeChunkAt(session, remotePath, chunkBytes, chunkSize, i
   if (cmd.length > 120 * 1024) {
     throw new Error(`内部错误：单块命令 ${cmd.length} 字符，超过实测上限 128KiB`);
   }
-  await session.shell(cmd, { timeoutMs: 60000, attempts: 2, retryOnEmpty: false });
+  // dd 写精确偏移，天然幂等；重试只会拖慢（等待设备关闭帧会被误判失败）
+  await session.shell(cmd, { timeoutMs: 90000, attempts: 1 });
   if (log) { log(`写入第 ${index} 块（${chunkBytes.length} 字节 @ ${index * chunkSize}）`); }
   return { bytes: chunkBytes.length };
 }
@@ -134,7 +135,7 @@ export async function pushFile(session, remotePath, bytes, opts = {}) {
     if (cmd.length > 120 * 1024) {
       throw new Error(`内部错误：单条命令 ${cmd.length} 字符，超过实测上限 128KiB`);
     }
-    await session.shell(cmd, { timeoutMs: 60000, attempts: 2, retryOnEmpty: false });
+    await session.shell(cmd, { timeoutMs: 90000, attempts: 1 });
     chunks += 1;
     if (onProgress) { onProgress(end, total); }
     if (log) { log(`上传 ${Math.round((end / total) * 100)}%（${end}/${total} 字节）`); }

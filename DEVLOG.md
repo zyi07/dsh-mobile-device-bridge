@@ -961,3 +961,32 @@ Cookie 仍然自动抓取，后续 AGC 自动化不受影响。
 **卡点（如实说明）：** 用**我们自己的新 CSR** 申请证书这一步，需要本地生成
 密钥库文件（`.jks`/`.p12`），被本机安全策略拦截（`secret.ext.jks`），
 不能在 shell 里做。需在**插件运行时（Node 子进程）**完成——这也是最终形态该有的位置。
+
+## 2026-11-22 20:35 - ID 签名全链路真机验证成功（含签出有效包）
+
+**用户要求：** 随便一个未签名 HAP 装一下试试。
+
+**这次真实跑通了整个链路（除最后推送安装）：**
+
+| 步骤 | 结果 |
+|---|---|
+| 1. 本地生成 ECC 密钥对 + CSR | ✅ `dsh_signing_store.jks`(480B) + `.csr`(436B) |
+| 2. 用 CSR 申请**调试证书** | ✅ `dsh_debug_bridge` id=`2089416742357996352`，有效期到 2027 |
+| 3. 下载证书 `.cer` | ✅ 2,906 字节 |
+| 4. 检查包名可用性 | ✅ `result:2`=可用（`org.ohosdev.anime` 为 1=已被占用） |
+| 5. 创建应用 | ✅ appId=`6917622501194387981`（包名 `com.dsh.bridgeapp`） |
+| 6. 创建**调试 Profile** | ✅ id=`2089417447118484928` |
+| 7. 下载 `.p7b` | ✅ 4,184 字节，解出 `type:debug`、`bundle-name:com.dsh.bridgeapp`、**device-ids 含本机 UDID** |
+| 8. 改造 HAP 包名 | ✅ abc 内 `@bundle:org.ohosdev.anime` **2025 处等长替换**为 `com.dsh.bridgeapp`（17→17 字符，不破坏偏移） |
+| 9. `hap-sign-tool sign-app` | ✅ Sign Hap success，产物 10,339,245 字节 |
+| 10. `verify-app` | ✅ `Digest verify result: true` / `verify: Verify success` |
+| 11. 推送到手机 | ❌ **超时**（10MB 走 shell+base64 分块太慢，15 分钟未完成且设备掉线） |
+| 12. `bm install -p` | ⏸ 待推送完成后验证 |
+
+**结论：ID 签名（证书 → 应用 → 调试 Profile → 签名 → 校验）已完整可行并实测签出有效包。**
+唯一瓶颈是 10MB 包的**推送速度**：shell+base64 分块（64KB/块 ≈ 160 块）太慢。
+
+**已修：** 分块写入去掉 `attempts:2` 重试（dd 精确偏移本就幂等，重试在等待设备关闭帧时被误判失败，导致耗时翻倍）。
+
+**下一步：** 要么实现 HDC 原生文件传输协议（CMD_FILE_*，调研已做，需抓包），
+要么先接受慢速推送（约 1MB/分钟）完成安装验证。
