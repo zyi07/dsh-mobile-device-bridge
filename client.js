@@ -6837,6 +6837,37 @@ function base64ToBytes(b64) {
   return out;
 }
 
+/** 从命令输出里取出 sha256（跳过 `$ cmd` 回显行与错误行） */
+function parseSha256(text) {
+  const m = String(text || '').match(/\b([0-9a-f]{64})\b/i);
+  return m ? m[1].toLowerCase() : '';
+}
+
+/** 本地字节的 sha256（hex） */
+async function sha256Bytes(bytes) {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * 校验远端文件内容与本地一致。
+ * 这一步不能省：shell 命令的失败信息走 stderr，我们只收 stdout，
+ * 所以"命令返回 ok"不等于"文件写成功"（实测往无权限目录写会静默失败）。
+ */
+async function verifyRemote(session, remotePath, localBytes) {
+  const [local, remoteRaw] = await Promise.all([
+    sha256Bytes(localBytes),
+    sha256Remote(session, remotePath),
+  ]);
+  if (!remoteRaw) {
+    return { ok: false, local, remote: '', error: '远端文件不存在或不可读（写入很可能失败）' };
+  }
+  if (local !== remoteRaw) {
+    return { ok: false, local, remote: remoteRaw, error: `校验不一致：本地 ${local.slice(0, 12)}… 远端 ${remoteRaw.slice(0, 12)}…` };
+  }
+  return { ok: true, local, remote: remoteRaw };
+}
+
 /** 把远端路径做 shell 转义（单引号包裹） */
 function shellQuote(p) {
   return `'${String(p).replace(/'/g, `'\\''`)}'`;
@@ -6878,6 +6909,10 @@ async function pushFile(session, remotePath, bytes, opts = {}) {
 
   if (total === 0) {
     await session.shell(`: > ${path}`, { timeoutMs: 15000, attempts: 1 });
+    const ls = await session.shell(`ls -l ${path}`, { timeoutMs: 15000, attempts: 1 });
+    if (/No such file|Permission denied/i.test(String(ls.text || ''))) {
+      throw new Error(`上传失败：${String(ls.text || '').trim().slice(0, 160)}`);
+    }
     if (onProgress) { onProgress(0, 0); }
     return { bytes: 0, chunks: 0 };
   }
@@ -6900,7 +6935,13 @@ async function pushFile(session, remotePath, bytes, opts = {}) {
     if (onProgress) { onProgress(end, total); }
     if (log) { log(`上传 ${Math.round((end / total) * 100)}%（${end}/${total} 字节）`); }
   }
-  return { bytes: total, chunks };
+  // 强制校验：写不进去（无权限/空间不足）时命令可能"看起来成功"
+  const check = await verifyRemote(session, remotePath, bytes);
+  if (!check.ok) {
+    throw new Error(`上传失败：${check.error}`);
+  }
+  if (log) { log(`校验通过 sha256=${check.local.slice(0, 16)}…`); }
+  return { bytes: total, chunks, sha256: check.local };
 }
 
 /**
@@ -6948,6 +6989,12 @@ async function pullFile(session, remotePath, opts = {}) {
   return { bytes, b64Length: b64.length };
 }
 
+/** 取远端文件 sha256（用于校验） */
+async function sha256Remote(session, remotePath) {
+  const r = await session.shell(`sha256sum ${shellQuote(remotePath)}`, { timeoutMs: 30000, attempts: 2 });
+  return parseSha256(r.text);
+}
+
 /**
  * 安装 HAP/HSP：先把包推到 /data/local/tmp，再执行 `bm install -p`。
  *
@@ -6962,6 +7009,11 @@ async function installHap(session, { bytes, filename, replace = false }, opts = 
 
   if (log) { log(`推送安装包到 ${remote}（${bytes.length} 字节）`); }
   await pushFile(session, remote, bytes, { onProgress, log });
+  const check = await verifyRemote(session, remote, bytes);
+  if (!check.ok) {
+    throw new Error(`安装包推送失败：${check.error}`);
+  }
+  if (log) { log(`安装包校验通过 sha256=${check.local.slice(0, 16)}…`); }
   if (log) { log('执行 bm install -p <包路径>'); }
   const args = replace ? `--replace` : '';
   const r = await session.shell(`bm install -p ${shellQuote(remote)} ${args}`.trim(),
@@ -6997,7 +7049,7 @@ async function uninstallBundle(session, bundleName) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r70';
+const BUILD_TAG = 'r71';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';

@@ -47,6 +47,31 @@ export function parseSha256(text) {
   return m ? m[1].toLowerCase() : '';
 }
 
+/** 本地字节的 sha256（hex） */
+export async function sha256Bytes(bytes) {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * 校验远端文件内容与本地一致。
+ * 这一步不能省：shell 命令的失败信息走 stderr，我们只收 stdout，
+ * 所以"命令返回 ok"不等于"文件写成功"（实测往无权限目录写会静默失败）。
+ */
+export async function verifyRemote(session, remotePath, localBytes) {
+  const [local, remoteRaw] = await Promise.all([
+    sha256Bytes(localBytes),
+    sha256Remote(session, remotePath),
+  ]);
+  if (!remoteRaw) {
+    return { ok: false, local, remote: '', error: '远端文件不存在或不可读（写入很可能失败）' };
+  }
+  if (local !== remoteRaw) {
+    return { ok: false, local, remote: remoteRaw, error: `校验不一致：本地 ${local.slice(0, 12)}… 远端 ${remoteRaw.slice(0, 12)}…` };
+  }
+  return { ok: true, local, remote: remoteRaw };
+}
+
 /** 把远端路径做 shell 转义（单引号包裹） */
 export function shellQuote(p) {
   return `'${String(p).replace(/'/g, `'\\''`)}'`;
@@ -88,6 +113,10 @@ export async function pushFile(session, remotePath, bytes, opts = {}) {
 
   if (total === 0) {
     await session.shell(`: > ${path}`, { timeoutMs: 15000, attempts: 1 });
+    const ls = await session.shell(`ls -l ${path}`, { timeoutMs: 15000, attempts: 1 });
+    if (/No such file|Permission denied/i.test(String(ls.text || ''))) {
+      throw new Error(`上传失败：${String(ls.text || '').trim().slice(0, 160)}`);
+    }
     if (onProgress) { onProgress(0, 0); }
     return { bytes: 0, chunks: 0 };
   }
@@ -110,7 +139,13 @@ export async function pushFile(session, remotePath, bytes, opts = {}) {
     if (onProgress) { onProgress(end, total); }
     if (log) { log(`上传 ${Math.round((end / total) * 100)}%（${end}/${total} 字节）`); }
   }
-  return { bytes: total, chunks };
+  // 强制校验：写不进去（无权限/空间不足）时命令可能"看起来成功"
+  const check = await verifyRemote(session, remotePath, bytes);
+  if (!check.ok) {
+    throw new Error(`上传失败：${check.error}`);
+  }
+  if (log) { log(`校验通过 sha256=${check.local.slice(0, 16)}…`); }
+  return { bytes: total, chunks, sha256: check.local };
 }
 
 /**
@@ -180,6 +215,11 @@ export async function installHap(session, { bytes, filename, replace = false }, 
   await pushFile(session, remote, bytes, { onProgress, log });
 
   const shaLocalHint = '';
+  const check = await verifyRemote(session, remote, bytes);
+  if (!check.ok) {
+    throw new Error(`安装包推送失败：${check.error}`);
+  }
+  if (log) { log(`安装包校验通过 sha256=${check.local.slice(0, 16)}…`); }
   if (log) { log('执行 bm install -p <包路径>'); }
   const args = replace ? `--replace` : '';
   const r = await session.shell(`bm install -p ${shellQuote(remote)} ${args}`.trim(),

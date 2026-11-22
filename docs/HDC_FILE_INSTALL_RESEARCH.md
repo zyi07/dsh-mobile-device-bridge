@@ -214,3 +214,45 @@ hdc.exe shell "bm get --udid"
 3. 如果暂时没有已签名的 HAP，先只抓 `file send` / `file recv`，安装那步跳过并告诉我
 
 拿到抓包我就按第四节落地，先做 `transfer-codec.js` 并用你的抓包字节做逐字节回归测试。
+---
+
+# 附录：2026-11-22 真机实测结论（已落地实现）
+
+## A.1 文件传输（shell + base64 路线，**已实现并验证**）
+
+| 项目 | 实测结果 |
+|---|---|
+| push（写入） | `echo -n '<b64>' \| base64 -d \| dd of=<path> bs=65536 seek=<n> conv=notrunc status=none` |
+| pull（读回） | `base64 <path>`，设备按 ~512B 逐帧推流 |
+| 校验 | `sha256sum`（**必须在命令后校验**） |
+| 单条命令上限 | **≈128 KiB**；80KB 二进制成功、96KB 失败 → 分块 64KiB |
+| 实测吞吐 | push ≈ 210 KB/s（1MB/4.9s）、pull ≈ 164 KB/s（1MB/6.4s） |
+| 往返校验 | 512KB / 1MB 三次 sha256（本地·远端·拉回）全部一致 |
+
+## A.2 必须避开的坑（都是真机踩出来的）
+
+1. **`shell()` 不能把"空输出"当失败重试** —— `echo \| base64 -d` 正常无输出，
+   重试会让命令执行两次；用 `>>` 追加时数据直接翻倍（实测 512KB 写成 983KB）。
+   现改为：只有「没收到设备关闭帧」才重试。
+2. **写命令失败走 stderr，我们只收 stdout** —— 往无权限目录写会"看起来成功"。
+   现在 push 结束强制 `sha256sum` 校验，不一致即报错。
+3. **HTTP 请求体上限 1 MiB** —— 1MB 文件 base64 后 1.4MB 会被拒（HTTP 100 后断开）。
+   已放宽 push/install 至 128 MiB，并额外支持**分片提交**（`index`/`chunkSize`）。
+4. **USB 句柄连续操作后可能失效** —— 需自动重连（已实现 `tryReconnectHdc`）。
+
+## A.3 设备侧可用性（实测）
+
+| 命令 | 结果 |
+|---|---|
+| `base64` / `sha256sum` / `dd` | ✅ 全部可用 |
+| `bm install -p <hap>` / `bm uninstall -n <bundle>` | ✅ 存在 |
+| shell 身份 | `uid=2000(shell) context=u:r:sh:s0` |
+| 可写目录 | `/data/local/tmp` ✅；`/storage/media/100`、`/data/app/el1/bundle/public` ❌ |
+| 设备 UDID | `<DEVICE_UDID>` |
+
+## A.4 仍未做
+
+- `CMD_FILE_*`（3000–3004）原生文件协议：**未抓包，未实现**。
+  当前 shell 路线已够用；若要提速（目标 1MB/s 以上）需抓包后实现。
+- HAP 安装：代码已就绪（推送 + `bm install -p` + 9568xxx 错误码翻译），
+  但**尚未用真实已签名 HAP 验证**——需要 Profile 含上面 UDID 的调试签名包。
