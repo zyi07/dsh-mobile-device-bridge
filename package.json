@@ -1,9 +1,9 @@
 {
   "name": "dsh-mobile-bridge",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
-  "description": "Connect Android devices over WebUSB (ADB) from a settings page.",
+  "description": "在设置页通过 WebUSB 或本机 adb/hdc 连接安卓/鸿蒙手机：执行命令、截图、传文件、安装/卸载应用（双通道）。",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -15,8 +15,12 @@
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",
-    "docs",
-    "icon.svg"
+    "icon.svg",
+    "lib",
+    "!lib/*.test.mjs",
+    "README.md",
+    "LICENSE",
+    "docs/DETAIL.md"
   ],
   "dsh": {
     "bundle": {
@@ -48,5 +52,15 @@
   "scripts": {
     "build": "node build.mjs",
     "test": "node src-client/hdc/codec.test.mjs && node src-client/hdc/transport.test.mjs && node src-client/hdc/session.test.mjs && node src-client/hdc/multi-device.test.mjs && node lib/cli-channel.test.mjs"
-  }
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "android",
+    "adb",
+    "harmonyos",
+    "hdc",
+    "webusb"
+  ]
 }

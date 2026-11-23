@@ -1475,3 +1475,17 @@ sysVersion 改为 `HarmonyOS 7.0.0.111`；另把 api 探测的候选去掉 softw
 **测试：** `lib/cli-channel.test.mjs` 用假 adb/hdc 脚本离线验证探测/列设备/exec/push/pull/install/uninstall/错误路径（全绿）。
 
 构建 r110。Linux 本机已装 adb 可真测探测；真机连接需 Windows/有设备的机器。
+
+## 2026-11-23 12:00 - 打包为标准 DSH 插件，准备发版
+
+**发版前修复：**
+- `private: true → false`（否则无法 publish）
+- `files` 补 `lib`（**关键**：`index.js` import 的 `lib/cli-channel.js` 否则不进包）+ `!lib/*.test.mjs` 排除测试
+- 精简 files：只带运行时（index.js/client.js/cordis.patch.yml/lib/locale/icon）+ README/LICENSE + docs/DETAIL.md
+- 新增 `README.md`、`LICENSE`（MIT）、`.gitignore`
+- 更新 `description` 与 locale `meta.description`（加鸿蒙/双通道）
+- 更新 `docs/DETAIL.md`（插件详情页，双通道版本）
+
+**打包验证：** `npm pack` → 11 个文件、142KB；解压后 `index.js` 语法 OK、`lib/cli-channel.js` 存在、import 正确。
+
+**包信息：** dsh-mobile-bridge@0.1.0，11 files，142.8kB。

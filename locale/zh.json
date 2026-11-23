@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "移动设备",
-    "description": "在设置页通过 WebUSB 连接安卓手机并执行 ADB 命令。",
+    "description": "在设置页通过 WebUSB 或本机 adb/hdc 连接安卓/鸿蒙手机：执行命令、截图、传文件、安装应用。",
     "detail": "docs/DETAIL.md"
   }
 }

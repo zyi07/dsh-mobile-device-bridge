@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Mobile device",
-    "description": "Connect an Android phone over WebUSB and run ADB commands from a settings section.",
+    "description": "Connect Android/HarmonyOS phones over WebUSB or the local adb/hdc CLI: run commands, take screenshots, transfer files and install apps.",
     "detail": "docs/DETAIL.md"
   }
 }
