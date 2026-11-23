@@ -1289,3 +1289,18 @@ lastUpdateTime: 2023-04-18 → 2026-11-23 10:03:19
 超时会明确提示「设备可能需要人工确认」，不假装成功。
 
 构建 r96。待验证：插件 `/install` 完整链路。
+
+## 2026-11-23 10:08 - Android push/pull/install/uninstall 全部真机验证通过
+
+| 能力 | 结果 |
+|---|---|
+| push 1MB | 6.5s，远端 sha256 一致 |
+| pull 1MB / 13MB | 4.2s / 9.4s，sha256 一致 |
+| **install（插件 /install 链路）** | **5.9s → Success** |
+| **uninstall（正面）** | **Success，pm path 变空** |
+| **重装 13MB（dev.zyiii.dshshell）** | **12.4s → Success，lastUpdateTime 更新** |
+
+备份文件：`/root/agc-test/dshshell_backup.apk`（13MB，用户授权测试用，可随时重装）。
+
+三项补齐（push/pull、install/uninstall、断线自愈）中前两项已真机验证；
+断线自愈代码就绪但未做物理拔插验证。下一步：多设备。

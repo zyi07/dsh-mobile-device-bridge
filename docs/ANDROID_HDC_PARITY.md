@@ -130,3 +130,25 @@ Android 侧调用会直接返回：
 Android 侧沿用早期接入 `@yume-chan/adb` 的最小实现，之后没再补。
 
 如果需要两边对齐，按第三节 1→2→3 补，Android 侧工作量不大（库都现成）。
+
+---
+
+## 五、补齐结果（2026-11-23 更新）
+
+前面第三节的差距清单已全部处理，并在真机（TNY-AL00 / Android 10）验证：
+
+| # | 原缺口 | 状态 | 真机验证结果 |
+|---|---|---|---|
+| 1 | Android push / pull | ✅ 已完成 | push 1MB 6.5s、pull 1MB 4.2s、pull 13MB 9.4s，sha256 一致 |
+| 2 | Android APK 安装 / 卸载 | ✅ 已完成 | install 5.9s→Success；13MB 装回 12.4s→Success；uninstall→Success 且 pm path 变空 |
+| 3 | Android 断线自愈 | ✅ 代码就绪 | `tryReconnectAdb()` 已实现（与 HDC 同策略），**未做物理拔插验证** |
+| 4 | 「本地安装」区块按平台隐藏 | ✅ 已完成 | 仅鸿蒙显示 |
+
+### 关键实现与踩坑（供后续参考）
+
+- 用 `@yume-chan/adb@2.6.4` 的 `adb.sync()`：`write({filename,file})` / `read(path)` / `dispose()`
+- 安装：`adb.subprocess.noneProtocol.spawn(['pm','install','-r',path])` + 收集 `output` 流
+- **不能并发 shell**：spawn 会占住通道，另一条 shell 命令发不出去（实测）
+- **adb shell 后台化不可靠**：`nohup ... &` / `setsid ... &` 在会话结束时子进程被杀，日志为空
+- 华为设备 `pm install` 默认会弹「风险提示→继续安装→输入密码」，
+  **必须在系统设置里关闭安装验证**后 `pm install` 才会直接 `Success`
