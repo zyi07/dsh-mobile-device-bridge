@@ -1,4 +1,4 @@
-# dsh-mobile-bridge
+# dsh-mobile-device-bridge
 
 DSH 插件：在「设置 → 移动设备」里通过 **WebUSB** 或**本机 adb/hdc 命令行**连接安卓 / 鸿蒙手机，
 执行命令、截图、传文件、安装/卸载应用。

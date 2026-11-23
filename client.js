@@ -1,4 +1,4 @@
-window.__ModuleLoader__.load({ id: "dsh-mobile-bridge", factory: (require) => {
+window.__ModuleLoader__.load({ id: "dsh-mobile-device-bridge", factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
 'use strict';
 

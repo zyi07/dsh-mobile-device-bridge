@@ -1496,3 +1496,11 @@ sysVersion 改为 `HarmonyOS 7.0.0.111`；另把 api 探测的候选去掉 softw
 - `install_bundle target=/root/dsh-mobile-bridge/dsh-mobile-bridge-0.1.0.tgz`
 - 结果：profile node_modules 下为**真实目录副本**（非软链），lib/cli-channel.js 存在，
   version 0.1.0，`/mbridge/status` 正常。开发目录与运行环境已解耦。
+
+## 2026-11-23 12:15 - 包名改为 dsh-mobile-device-bridge（原名被占）
+
+`dsh-mobile-bridge` 在 npm 公有源已被他人占用（maintainer dshapp，0.3.7），无法发布。
+改用 **dsh-mobile-device-bridge**（未占用，404）。
+- package.json name、cordis.patch.yml 的 moduleName、README 标题、**build.mjs 的 client module id**（必须与包名一致）全部改名
+- 重新 build + pack → dsh-mobile-device-bridge-0.1.0.tgz
+- profile：remove 旧 dsh-mobile-bridge → install 新包，验证真实目录、lib 存在、/mbridge/status 正常
