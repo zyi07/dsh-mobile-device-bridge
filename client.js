@@ -7235,7 +7235,7 @@ async function uninstallPackageAdb(adb, pkg) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r104';
+const BUILD_TAG = 'r105';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -7321,6 +7321,12 @@ function syncActiveToSessions() {
 function registerCurrentSession() {
   if (!STATE.kind || (!STATE.adb && !STATE.hdc)) { return; }
   const id = sessionKey(STATE.kind, STATE.info, STATE.device);
+  const prev = STATE.sessions.find((s) => s.id === id);
+  if (prev && (prev.adb !== STATE.adb || prev.hdc !== STATE.hdc)) {
+    // 同 id 但不同实例：关闭旧实例，避免 claim 泄漏
+    if (prev.hdc && prev.hdc !== STATE.hdc) { try { prev.hdc.close(); } catch { /* ignore */ } }
+    if (prev.adb && prev.adb !== STATE.adb) { try { prev.adb.close(); } catch { /* ignore */ } }
+  }
   STATE.sessions = STATE.sessions.filter((s) => s.id !== id);
   STATE.sessions.push({
     id, kind: STATE.kind, adb: STATE.adb, hdc: STATE.hdc,
@@ -8334,6 +8340,19 @@ function MobileBridgeSection(props) {
   async function runConnect(device) {
     // 多设备：先把当前活跃设备存进 sessions（不清空、不断开），再连接新设备
     syncActiveToSessions();
+    // ★ 同一台设备（同 serial）重复连接时，必须先关闭旧会话释放它的 WebUSB claim，
+    //   否则旧 HdcSession 还 claim 着接口，新连接必然 claim 失败，且要重启浏览器才恢复。
+    try {
+      const devSerial = device && (device.serialNumber || device.serial);
+      if (devSerial) {
+        const dup = STATE.sessions.filter((s) =>
+          (s.info && s.info.serial === devSerial)
+          || (s.device && (s.device.serialNumber || s.device.serial) === devSerial));
+        for (const old of dup) {
+          try { await removeSession(old.id); } catch { /* ignore */ }
+        }
+      }
+    } catch { /* ignore */ }
     const token = ++STATE.connectToken;
     STATE.info = null;
     try {

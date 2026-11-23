@@ -1351,3 +1351,21 @@ Chrome/Edge WebUSB 底层无法 claim。标准解法是 Zadig 给该设备装 Wi
 - `findHdcInterfaceFromConfigurations` 返回真实 configurationValue（不再硬编码 1）
 - `diagnoseUsb` 输出 configurationValue / configurations 详情
 - poll 上报 log 字段恢复（之前加 devices 时误删）
+
+## 2026-11-23 10:55 - 【重要 bug】重复连接同一设备泄漏 WebUSB claim（r105）
+
+**用户现象：** 反复连鸿蒙后，claimInterface 一直失败（Unable to claim interface），
+F5 无效，**重启电脑才恢复**。任务管理器无 hdc/华为进程。
+
+**根因（我多设备代码的 bug）：** `registerCurrentSession()` 用 filter 替换同 serial 的旧会话时，
+**没有关闭旧会话**。旧的 `HdcSession` 心跳继续跑、**一直 claim 着 WebUSB 接口**。
+→ 每重连一次泄漏一个 claim，累积后所有 claim 失败；claim 是浏览器进程级，F5 清不掉，重启才释放。
+
+**修复：**
+- `runConnect()` 开始连接前，先找出 sessions 里**同 serial** 的旧会话并 `removeSession`（关闭并释放 claim）
+- `registerCurrentSession()` 替换同 id 旧实例时也补 close 兜底
+
+**排除了的错误方向：** hdc 进程占用、多标签页、HID 接口、WinUSB 驱动缺失
+（Zadig 也无效）——都不是。真因是插件自己的 claim 泄漏。
+
+构建 r105。待验证：安卓+鸿蒙双设备同时连接与切换。
