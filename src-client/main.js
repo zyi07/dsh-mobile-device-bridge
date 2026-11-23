@@ -8,7 +8,7 @@ import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChu
 import { pushFileAdb, pullFileAdb, installApkAdb, uninstallPackageAdb } from './adb/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r105';
+const BUILD_TAG = 'r106';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -278,6 +278,7 @@ async function tryReconnectAdb() {
     const next = await attach(dev);
     STATE.kind = 'adb';
     STATE.info = next;
+    registerCurrentSession();   // ★ 更新 sessions
     pushHdcLog('ADB', '自动重连成功');
     return true;
   } catch (e) {
@@ -297,7 +298,10 @@ async function tryReconnectHdc() {
   if (typeof navigator === 'undefined' || !navigator.usb) { return false; }
   try {
     const list = await navigator.usb.getDevices();
-    const dev = list.find((d) => d.vendorId === 0x12d1);
+    // 多设备：必须按当前活跃设备的 serial 找，不能取第一个（否则会重连到另一台）
+    const wantSerial = STATE.device && (STATE.device.serialNumber || STATE.device.serial);
+    const dev = (wantSerial && list.find((d) => d.vendorId === 0x12d1 && (d.serialNumber || d.serial) === wantSerial))
+      || list.find((d) => d.vendorId === 0x12d1);
     if (!dev) { return false; }
     pushHdcLog('INFO', 'USB 句柄失效，尝试自动重连');
     const next = await withConnectLock(async () => {
@@ -307,6 +311,7 @@ async function tryReconnectHdc() {
     });
     STATE.info = next;
     STATE.kind = 'hdc';
+    registerCurrentSession();   // ★ 更新 sessions 里的会话引用，否则切设备会用到失效的旧会话
     pushHdcLog('INFO', '自动重连成功');
     return true;
   } catch (e) {

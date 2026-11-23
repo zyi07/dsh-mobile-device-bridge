@@ -46,6 +46,7 @@
     "@yume-chan/stream-extra": "^2.1.0"
   },
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "test": "node src-client/hdc/codec.test.mjs && node src-client/hdc/transport.test.mjs && node src-client/hdc/session.test.mjs && node src-client/hdc/multi-device.test.mjs"
   }
 }
