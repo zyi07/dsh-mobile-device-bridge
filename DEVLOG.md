@@ -1265,3 +1265,27 @@ while (!stopped) {
 **已确认：**「继续安装」按钮 bounds = `[551,2156][1009,2258]`，中心 (780,2207)，动态解析不写死。
 
 构建 r94。
+
+## 2026-11-23 10:04 - Android 安装打通（r96）：用户关闭华为安装验证
+
+**关键约束（用户确认）：** 华为设备 `pm install` 点击「继续安装」后还要**输入密码**，
+这是 EMUI 的安装身份验证。用户已在系统设置里关闭（参考 CSDN 的华为安装验证关闭方法）。
+
+**验证结果（直接 shell）：**
+```
+pm install -r /data/local/tmp/kb.apk
+→ Success
+lastUpdateTime: 2023-04-18 → 2026-11-23 10:03:19
+```
+
+**过程中排除掉的错误方案（都已实测不可行）：**
+1. `nohup pm install &` / `setsid pm install &` → adb shell 退出即杀子进程，日志空
+2. `spawn()` 并发 shell 点确认 → **yume-chan 的 adb 不支持并发 shell**，spawn 占死通道，点确认命令发不出
+3. 同会话 `( 循环检测+input tap ) &` → 子 shell 能点（TAPPED@1 证明），但点的是残留弹窗，且 `wait $PMPID` 无限等
+
+**最终实现（r96）：**
+`installApkAdb` 重建为 **spawn（不等待）+ 收集 output 流 + 90s 超时 kill**，
+去掉所有 uiautomator/点确认逻辑（无弹窗后纯属干扰）。
+超时会明确提示「设备可能需要人工确认」，不假装成功。
+
+构建 r96。待验证：插件 `/install` 完整链路。
