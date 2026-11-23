@@ -79,3 +79,18 @@ curl -s -m 25 -X POST "$BASE/exec" -H 'content-type: application/json' \
 2. **插件优先**：插件已连设备时，用插件接口，不要再去抢本机 adb/hdc（会和插件的 USB claim 打架）。
 3. **降级要说明**：回落本机通道时，在回复里说明「插件未连接，改用本机 adb/hdc」。
 4. **不假装**：两条路都不通时如实说无法操作。
+
+## 两条通道（WebUSB / 本机 CLI）
+插件现在有两条**互不影响**的通道，按运行环境选：
+
+- **WebUSB 通道**（`/mbridge/exec|screenshot|push|pull|install|uninstall|activate`）
+  浏览器里有 `navigator.usb` 且通过 `requestDevice` 连了设备时用（Chrome/Edge 直接访问 DSH web）。
+- **本机 CLI 通道**（`/mbridge/cli/status|exec|screenshot|push|pull|install|uninstall|activate`）
+  宿主能探测到本机 adb/hdc 时用（**DSH 桌面端 Electron 首选**：绕开 WebUSB 限制和 WinUSB 驱动问题）。
+  探测：`GET /mbridge/cli/status` → `{available, adb, hdc, devices, activeId}`；
+  设备 id 形如 `cli:adb:<serial>` / `cli:hdc:<connectKey>`，用 `deviceId` 指定或用 active。
+
+选通道顺序：
+1. 需要操作手机 → 先 `GET /mbridge/cli/status`，`available=true` 且有 devices → **走 CLI**（桌面端/本机最稳）
+2. 否则 `GET /mbridge/status`，`devices` 非空 → 走 WebUSB
+3. 两者都没有 → 让用户连接设备；都不可用就如实说无法操作
