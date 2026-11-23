@@ -1,0 +1,8 @@
+# 提交到 awesome-dsh-plugin 的条目文件
+# 放到 PR 的 data/plugins/zyi07__dsh-mobile-device-bridge.yml
+url: https://github.com/zyi07/dsh-mobile-device-bridge
+name: zyi07/dsh-mobile-device-bridge
+category: remote
+description:
+  en: Connect Android and HarmonyOS phones from a DSH settings page over WebUSB or the local adb/hdc CLI, then run shell commands, take screenshots, transfer files, install or uninstall apps, and side-load ID-signed HarmonyOS HAPs.
+  zh: 在 DSH 设置页通过 WebUSB 或本机 adb/hdc 连接安卓与鸿蒙手机，执行命令、截图、传文件、安装或卸载应用，并可 ID 签名侧载鸿蒙 HAP。
