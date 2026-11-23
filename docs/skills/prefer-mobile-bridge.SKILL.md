@@ -1,7 +1,7 @@
 ---
 name: prefer-mobile-bridge
-description: 当需要通过 adb/hdc 操作手机（执行命令/截图/传文件/安装卸载应用）时，先检查 dsh-mobile-bridge 插件是否已连接设备；已连接就优先用它的 /mbridge 远程接口，未连接再回落本机 adb/hdc 通道。
-whenToUse: 要执行 adb/hdc 命令、截屏、推送/拉取文件、安装或卸载 App 时；尤其是手机插在用户电脑上、当前机器没有 adb/hdc 或没接数据线、需要远程操作设备时。
+description: 当需要连接手机（安卓/鸿蒙）执行命令、截图、传文件、安装/卸载应用，或给鸿蒙 HAP 做 ID 签名并侧载安装（AGC 证书/Profile、no signature file 报错、bm/adb install、sideload）时，优先用 dsh-mobile-bridge 插件的 /mbridge 接口，未连接再回落本机 adb/hdc。
+whenToUse: 要执行 adb/hdc 命令、截屏、推/拉文件、安装或卸载 App、给未签名 HAP 做 ID 签名后安装（bm install 报 no signature file / code:9568320）时；尤其手机插在用户电脑上、当前机器没有 adb/hdc 或没接数据线、需要远程操作设备时。
 tags: adb, hdc, mobile, bridge, webusb
 ---
 
@@ -94,3 +94,25 @@ curl -s -m 25 -X POST "$BASE/exec" -H 'content-type: application/json' \
 1. 需要操作手机 → 先 `GET /mbridge/cli/status`，`available=true` 且有 devices → **走 CLI**（桌面端/本机最稳）
 2. 否则 `GET /mbridge/status`，`devices` 非空 → 走 WebUSB
 3. 两者都没有 → 让用户连接设备；都不可用就如实说无法操作
+
+## 鸿蒙 HAP 签名侧载（`no signature file` / code:9568320）
+
+**未签名 HAP 会被设备拒绝（`no signature file`），不要直接 `bm install` 未签名 HAP。** 插件内置了 AGC 登录与签名能力，流程：
+
+1. **登录华为账号**（插件内置，无需浏览器扩展）：
+   - `POST /mbridge/agc/login/start` → 返回登录二维码
+   - `GET /mbridge/agc/login/status` 轮询直到扫码成功
+   - 或 `POST /mbridge/agc/login/password {account,password}`（有滑块验证码时改走扫码）
+2. **申请调试证书 + Profile**（AGC 网页，插件通过 `/mbridge/agc/act` 驱动页面操作）
+3. **签名 HAP**（AGC 页面操作，产物用 `GET /mbridge/agc/hap` 下载）
+4. **安装**：
+   - 本机 CLI：`POST /mbridge/cli/install {base64, filename}`
+   - 或 WebUSB：`POST /mbridge/install`
+   - 底层是 `hdc install` / `bm install`
+
+> 该流程依赖 AGC 网页自动化（`/mbridge/agc/*` 是给设置页面板用的）。agent 若无法驱动网页，应引导用户在 **设置 → 移动设备 → 华为账号** 完成登录/签名，不要自行编造签名步骤。
+
+## 常见错误
+- `no signature file` / `code:9568320` → HAP 未签名，走上面的签名流程（或让用户在面板里签名）
+- `浏览器没有报告已连接设备` → 设备没连，先在设置页点「连接设备」
+- `Unable to claim interface` → 关掉其它 DSH 标签页 / 本机 hdc.exe、DevEco、华为助手

@@ -143,6 +143,124 @@ export function apply(ctx) {
     return true;
   }
 
+  // ---- agent tools：让任意会话的 agent 直接调用手机能力（不依赖 skill 匹配）----
+  ctx.inject(['tools'], (toolsCtx) => {
+    void (async () => {
+      let defineTool = null;
+      try {
+        const { pathToFileURL } = await import('node:url');
+        const dir = process.env.DSH_INSTALL_DIR || '/usr/lib/node_modules/@deepseek-ai/dsh';
+        const mod = await import(pathToFileURL(nodePath.join(dir, 'node_modules', '@deepseek-ai', 'dsh-tools', 'lib', 'index.js')).href);
+        defineTool = mod.defineTool;
+      } catch { return; }        // 拿不到 defineTool 就跳过，不影响插件其余功能
+      if (typeof defineTool !== 'function') { return; }
+
+      const textOut = (a, v) => [{ type: 'text', text: String(v) }];
+      const strSchema = { type: 'string' };
+
+      const pickDevice = async (deviceId) => {
+        const tools = await cliChannel.detectTools();
+        let cliDevs = [];
+        try { cliDevs = await cliChannel.listDevices(tools); } catch { /* ignore */ }
+        if (cliDevs.length) {
+          const dev = cliDevs.find((d) => d.id === deviceId)
+            || cliDevs.find((d) => d.id === cliState.activeId) || cliDevs[0];
+          return { mode: 'cli', tools, dev };
+        }
+        if (device || devices.length) { return { mode: 'browser' }; }
+        throw new Error('没有可用手机：本机没有 adb/hdc 设备，浏览器也没有连接设备。请让用户在设置页「移动设备」连接。');
+      };
+
+      toolsCtx.tools.register(defineTool({
+        name: 'mobile_bridge_devices',
+        description: 'List phones available to the dsh-mobile-device-bridge plugin: local adb/hdc CLI devices and devices connected in the browser over WebUSB.',
+        parameters: {},
+        output: { schema: strSchema, render: textOut },
+        async execute() {
+          const lines = [];
+          try {
+            const tools = await cliChannel.detectTools();
+            const ds = await cliChannel.listDevices(tools);
+            for (const d of ds) { lines.push(`[CLI] ${d.kind} ${d.model || ''} ${d.serial}  id=${d.id}`); }
+          } catch { /* ignore */ }
+          for (const d of devices) { lines.push(`[WebUSB] ${d.kind} ${d.model || ''} ${d.serial}  id=${d.id}`); }
+          return lines.length ? lines.join('\n') : '没有可用设备：插好手机并开启调试，或在设置页「移动设备」点「连接设备」。';
+        },
+      }));
+
+      toolsCtx.tools.register(defineTool({
+        name: 'mobile_bridge_exec',
+        description: 'Run a shell command on a connected Android or HarmonyOS phone through the dsh-mobile-device-bridge plugin (local adb/hdc CLI first, else the browser WebUSB session).',
+        parameters: {
+          cmd: { type: 'string', required: true, description: 'Shell command, e.g. getprop ro.product.model or param get const.product.model.' },
+          deviceId: { type: 'string', description: 'Optional device id from mobile_bridge_devices; defaults to the active device.' },
+          timeoutMs: { type: 'number', description: 'Optional timeout in milliseconds (default 30000).' },
+        },
+        output: { schema: strSchema, render: textOut },
+        async execute({ cmd, deviceId, timeoutMs }) {
+          const r = await pickDevice(deviceId);
+          if (r.mode === 'cli') {
+            const out = await cliChannel.execShell(r.tools, r.dev, String(cmd), { timeoutMs: Number(timeoutMs) || 30000 });
+            return out.text;
+          }
+          const res = await enqueue('shell', { cmd: String(cmd) }, Number(timeoutMs) || 60000);
+          return res.output || '';
+        },
+      }));
+
+      toolsCtx.tools.register(defineTool({
+        name: 'mobile_bridge_screenshot',
+        description: 'Take a screenshot of a connected phone, save it to a local file and return that path (use read_image on it).',
+        parameters: {
+          deviceId: { type: 'string', description: 'Optional device id; defaults to the active device.' },
+        },
+        output: { schema: strSchema, render: textOut },
+        async execute({ deviceId }) {
+          const fsMod = await import('node:fs/promises');
+          const r = await pickDevice(deviceId);
+          if (r.mode === 'cli') {
+            const shot = await cliChannel.screenshot(r.tools, r.dev);
+            const ext = String(shot.mime).includes('jpeg') ? 'jpg' : 'png';
+            const file = `/tmp/mbridge-shot-${Date.now()}.${ext}`;
+            await fsMod.writeFile(file, shot.bytes);
+            return file;
+          }
+          const res = await enqueue('screenshot', {}, 90000);
+          const bytes = Buffer.from(res.base64 || '', 'base64');
+          const ext = String(res.mime || '').includes('jpeg') ? 'jpg' : 'png';
+          const file = `/tmp/mbridge-shot-${Date.now()}.${ext}`;
+          await fsMod.writeFile(file, bytes);
+          return file;
+        },
+      }));
+
+      toolsCtx.tools.register(defineTool({
+        name: 'mobile_bridge_install',
+        description: 'Install an APK (Android) or HAP (HarmonyOS) file on a connected phone. The HarmonyOS HAP must already be signed; use the prefer-mobile-bridge skill for signing.',
+        parameters: {
+          file: { type: 'string', required: true, description: 'Absolute path to the local .apk/.hap file.' },
+          deviceId: { type: 'string', description: 'Optional device id; defaults to the active device.' },
+          replace: { type: 'boolean', description: 'Replace an existing install (default true).' },
+        },
+        output: { schema: strSchema, render: textOut },
+        async execute({ file, deviceId, replace }) {
+          const fsMod = await import('node:fs/promises');
+          const buf = await fsMod.readFile(file);
+          const r = await pickDevice(deviceId);
+          if (r.mode === 'cli') {
+            return await cliChannel.install(r.tools, r.dev, buf, nodePath.basename(file), replace !== false);
+          }
+          const res = await enqueue('install', {
+            filename: nodePath.basename(file),
+            base64: buf.toString('base64'),
+            replace: replace !== false,
+          }, 300000);
+          return res.output || 'ok';
+        },
+      }));
+    })();
+  });
+
   const okValue = (value) => ({ ok: true, value });
   const fail = (code, message) => ({ ok: false, error: { code, message, details: {} } });
 

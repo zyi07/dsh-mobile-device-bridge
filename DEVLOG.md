@@ -1542,3 +1542,24 @@ exec/screenshot 全部报「浏览器没有报告已连接设备」；diag.lastL
 
 **版本 0.1.2**（需 npm publish）。**未解决：** HDC over WebUSB 只有 TX 无 RX 的根因（会话半死），
 本次先让 exec 不再被 null 误杀、并暴露真实错误；若仍失败，用新诊断字段定位。
+
+## 2026-11-23 15:45 - 0.1.3 注册 agent tools（不再依赖 skill 匹配）
+
+**问题：** 另一个会话的 agent 不知道插件能做签名安装——因为插件能力只暴露为 UI + HTTP 接口，
+没有 agent tool；skill 又因描述不含"签名"没被加载。
+
+**新增 4 个 agent tool**（host 侧 `ctx.inject(['tools'])` 注册，用 defineTool）：
+- `mobile_bridge_devices`：列 CLI + WebUSB 设备
+- `mobile_bridge_exec`：执行命令（CLI 优先，否则 enqueue WebUSB `shell`）
+- `mobile_bridge_screenshot`：截图 → 本地路径
+- `mobile_bridge_install`：安装 APK/HAP
+
+**实现要点：**
+- 插件不能 import `@deepseek-ai/dsh-tools`（包名解析不到）→ 用 `import(pathToFileURL(<DSH_INSTALL_DIR>/node_modules/@deepseek-ai/dsh-tools/lib/index.js))` 绝对路径动态加载
+- 浏览器任务 kind 是 `shell` 不是 `exec`（对齐 runner，否则「未知任务类型 exec」）
+- 注册失败 try/catch 跳过，不影响插件其余功能
+
+**实测：** `mobile_bridge_devices` 返回 `[WebUSB] hdc PLA-AL10 …`。
+`exec` 首次超时是浏览器页面停止轮询（browserAlive:false，113s 未 poll），非工具 bug。
+
+构建 0.1.3。
