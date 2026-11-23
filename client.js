@@ -6102,7 +6102,9 @@ function parseUsbHead(bytes) {
  * 而 device.configurations 是描述符本身，随时可读。
  */
 function findHdcInterfaceFromConfigurations(device) {
-  if (device.configuration) { return findHdcInterface(device); }
+  // 总是遍历 device.configurations 找 HDC 接口，并把它所在的 configurationValue 一起返回。
+  // （之前 device.configuration 有值时只走 findHdcInterface，拿不到 configurationValue，
+  //  claim 时只能瞎猜 1 —— 多设备/重新插拔后这个猜测经常是错的。）
   const cfgs = device.configurations || [];
   for (const cfg of cfgs) {
     for (const iface of cfg.interfaces || []) {
@@ -6112,11 +6114,19 @@ function findHdcInterfaceFromConfigurations(device) {
           && alt.interfaceSubclass === IFACE_SUBCLASS
           && alt.interfaceProtocol === IFACE_PROTOCOL) {
           const eps = findBulkEndpoints(alt);
-          if (eps) { return { interfaceNumber: iface.interfaceNumber, ...eps }; }
+          if (eps) {
+            return {
+              interfaceNumber: iface.interfaceNumber,
+              configurationValue: cfg.configurationValue,
+              ...eps,
+            };
+          }
         }
       }
     }
   }
+  // 兜底：用当前 configuration
+  if (device.configuration) { return findHdcInterface(device); }
   throw new Error('描述符里找不到 HDC 接口（class 0xFF/0x50/0x01）');
 }
 
@@ -6207,15 +6217,27 @@ class HdcTransport {
           await d.claimInterface(this.iface.interfaceNumber);
           this.emit('INFO', `claim 成功（未调用 selectConfiguration）iface=${this.iface.interfaceNumber}`);
         } catch (eClaimNoSel) {
-          if (!d.configuration) {
-            const cfg = d.configurations && d.configurations[0];
-            if (!cfg) { throw eClaimNoSel; }
-            await d.selectConfiguration(cfg.configurationValue);
-            this.selectedConfig = true;
-            this.emit('INFO', `回退：已 selectConfiguration(${cfg.configurationValue})，重新 claim`);
-            await d.claimInterface(this.iface.interfaceNumber);
-          } else {
-            throw eClaimNoSel;
+          // 直接 claim 失败 → 无条件显式 selectConfiguration 再 claim。
+          // 之前只在 d.configuration 为空时才回退，多设备/重新插拔后 configuration 已有值
+          // 但接口并未真正激活，导致 claim 永远失败。这里改为总是回退。
+          const cfgs = d.configurations || [];
+          const cfgVal = this.iface.configurationValue
+            || (d.configuration && d.configuration.configurationValue)
+            || (cfgs[0] && cfgs[0].configurationValue) || 1;
+          this.emit('INFO', `直接 claim 失败（${(eClaimNoSel && eClaimNoSel.message) || eClaimNoSel}），`
+            + `回退 selectConfiguration(${cfgVal}) 后重新 claim`);
+          await d.selectConfiguration(cfgVal);
+          this.selectedConfig = true;
+          for (let c = 1; c <= 3; c++) {
+            try {
+              await d.claimInterface(this.iface.interfaceNumber);
+              this.emit('INFO', `回退 claim 成功 iface=${this.iface.interfaceNumber}`);
+              break;
+            } catch (eC) {
+              if (c === 3) { throw eClaimNoSel; }
+              this.emit('INFO', `回退 claim 第 ${c}/3 次失败：${(eC && eC.message) || eC}，300ms 后重试`);
+              await sleep$1(300);
+            }
           }
         }
         this.opened = true;
@@ -6224,6 +6246,8 @@ class HdcTransport {
         lastErr = e;
         lastStep = step;
         this.opened = false;
+        this.emit('ERROR', `open 第 ${attempt}/${attempts} 次失败 step=${step}: `
+          + `${(e && e.name) || 'Error'}: ${(e && e.message) || e}`);
         try { await d.close(); } catch { /* ignore */ }
         if (attempt < attempts) { await sleep$1(delayMs * attempt); }
       }
@@ -6748,6 +6772,15 @@ async function diagnoseUsb() {
       serial: d.serialNumber || '',
       opened: !!d.opened,
       productName: d.productName || '',
+      configurationValue: d.configuration ? d.configuration.configurationValue : null,
+      configurations: (d.configurations || []).map((c) => ({
+        value: c.configurationValue,
+        interfaces: (c.interfaces || []).map((i) => ({
+          num: i.interfaceNumber,
+          cls: '0x' + (i.alternate && i.alternate.interfaceClass || 0).toString(16),
+          altCount: 1 + (i.alternates ? i.alternates.length : 0),
+        })),
+      })),
       interfaces: d.configuration
         ? d.configuration.interfaces.map((i) => {
             const a = i.alternate;
@@ -7202,7 +7235,7 @@ async function uninstallPackageAdb(adb, pkg) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r100';
+const BUILD_TAG = 'r104';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -7753,6 +7786,7 @@ async function connectHarmonyInner(t, device) {
   try {
     authText = await session.connect();
   } catch (e) {
+    t.emit('ERROR', `握手/连接异常：${(e && e.message) || e}`);
     try { session.abort('连接失败'); } catch { /* ignore */ }
     if (STATE.hdcPending === session) { STATE.hdcPending = null; }
     throw e;
@@ -8074,6 +8108,7 @@ function startBridge(connection) {
             active: x.id === STATE.activeId,
           })),
           activeId: STATE.activeId,
+          log: STATE.log && STATE.log.length ? STATE.log.slice(-80) : undefined,
           build: BUILD_TAG,
           log: STATE.log && STATE.log.length ? STATE.log.slice(-80) : undefined,
         });

@@ -8,7 +8,7 @@ import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChu
 import { pushFileAdb, pullFileAdb, installApkAdb, uninstallPackageAdb } from './adb/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r100';
+const BUILD_TAG = 'r104';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -657,6 +657,7 @@ async function connectHarmonyInner(t, device) {
   try {
     authText = await session.connect();
   } catch (e) {
+    t.emit('ERROR', `握手/连接异常：${(e && e.message) || e}`);
     try { session.abort('连接失败'); } catch { /* ignore */ }
     if (STATE.hdcPending === session) { STATE.hdcPending = null; }
     throw e;
@@ -978,6 +979,7 @@ function startBridge(connection) {
             active: x.id === STATE.activeId,
           })),
           activeId: STATE.activeId,
+          log: STATE.log && STATE.log.length ? STATE.log.slice(-80) : undefined,
           build: BUILD_TAG,
           log: STATE.log && STATE.log.length ? STATE.log.slice(-80) : undefined,
         });

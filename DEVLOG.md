@@ -1331,3 +1331,23 @@ lastUpdateTime: 2023-04-18 → 2026-11-23 10:03:19
 （用户要求：放在 chip 旁边太割裂）。
 
 构建 r100。
+
+## 2026-11-23 10:45 - 排查：鸿蒙 claimInterface 失败（环境/驱动问题，非代码）
+
+**现象：** 连鸿蒙报 `NetworkError: Unable to claim interface`；只插鸿蒙、单标签页、杀进程、
+切换 USB 模式（PID 0x1101→0x5000）**全部失败**。安卓一切正常。
+
+**判定依据（非代码）：**
+- 87b02ff（鸿蒙此前能连的版本）claim 逻辑更严格；当前改动只会更宽容，不可能"能连变不能连"
+- 同一边览器/WebUSB，安卓可连 → WebUSB 本身正常
+- 诊断显示目标接口 `claimed:false`（无占用），却 claim 不上
+- 各 USB 模式 PID 都失败
+
+**结论：** Windows 侧鸿蒙设备的 HDC 接口未被 WinUSB 驱动接管（被华为复合驱动占用），
+Chrome/Edge WebUSB 底层无法 claim。标准解法是 Zadig 给该设备装 WinUSB 驱动。
+
+**本轮代码改进（保留）：**
+- `HdcTransport.open` claim 失败时 emit 详细错误 + 无条件回退 selectConfiguration 重试
+- `findHdcInterfaceFromConfigurations` 返回真实 configurationValue（不再硬编码 1）
+- `diagnoseUsb` 输出 configurationValue / configurations 详情
+- poll 上报 log 字段恢复（之前加 devices 时误删）
