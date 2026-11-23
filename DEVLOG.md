@@ -1521,3 +1521,24 @@ sysVersion 改为 `HarmonyOS 7.0.0.111`；另把 api 探测的候选去掉 softw
 **profile：** 升级到 0.1.1（tools/assets/extension 均在，插件运行正常）。
 
 **待办：** `npm publish` 发 0.1.1（0.1.0 缺脚本），然后向 awesome-dsh-plugin 提 PR。
+
+## 2026-11-23 14:40 - 0.1.2 修复上线故障（报告：device 抖动 / exec 全失败 / 无 RX）
+
+**用户报告（别人实测，鸿蒙 PLA-AL10 over WebUSB）：** status 的 device/devices 在 YES/NULL 间抖动；
+exec/screenshot 全部报「浏览器没有报告已连接设备」；diag.lastLog 只有 TX 无 RX；poll 快照不存在。
+
+**修复：**
+1. **device 粘性（P0）**：poll 收到 `device:null` 时，若距上次有效设备 < 15s，**不清空**；
+   超窗口才认定断开。needBrowser 用粘性后的状态，并透出浏览器真实错误（browserState/browserError）。
+   → 修掉「status 抖动 + exec 在 null 瞬间失败」。
+2. **落盘 bug（真因）**：poll 快照/日志用裸 `path.join` 而模块只 import 了 `nodePath` →
+   `path is not defined`，`mbridge-poll.json`/`mbridge-hdc.log` **一直静默写失败**。改为 nodePath。
+   诊断里加 `snapshotError` / `pollKeys`。
+3. **CLI 探测**：补 HarmonyOS SDK 路径（`/opt/harmony26/command-line-tools/.../hdc` 等）、
+   `HDC_PATH`/`ADB_PATH` 环境变量，hdc 在 Linux 补 `LD_LIBRARY_PATH=/usr/x86_64-linux-gnu/lib`（缺 libatomic）。
+4. **状态上报**：浏览器 poll 带 `state`(connected/failed/connecting/idle) 与 `lastError`；
+   status 加 `deviceAgeMs`/`deviceStickyMs`/`browserState`/`browserError`。
+5. 删除框架拒绝的、不带 `/api` 的重复 Fetch 路由（`fetchErrors` 清零）。
+
+**版本 0.1.2**（需 npm publish）。**未解决：** HDC over WebUSB 只有 TX 无 RX 的根因（会话半死），
+本次先让 exec 不再被 null 误杀、并暴露真实错误；若仍失败，用新诊断字段定位。

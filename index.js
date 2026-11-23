@@ -39,6 +39,12 @@ export function apply(ctx) {
   let lastSeen = 0;
   let device = null;
   let devices = [];
+  // 设备状态粘性：浏览器在重连/心跳抖动期间会短暂上报 device:null，
+  // 不能一收到 null 就清空，否则 status 抖动、exec 在 null 命中的瞬间直接失败。
+  const DEVICE_STICKY_MS = 15000;
+  let lastDeviceAt = 0;
+  let browserState = null;
+  let browserError = null;
   // ---- 本机 CLI 通道（adb/hdc 命令行）----
   let cliToolsCache = null;
   const cliState = { activeId: null };
@@ -188,6 +194,10 @@ export function apply(ctx) {
               lastSeenMsAgo: lastSeen ? now() - lastSeen : null,
               device,
               devices,
+              deviceAgeMs: lastDeviceAt ? now() - lastDeviceAt : null,
+              deviceStickyMs: DEVICE_STICKY_MS,
+              browserState,
+              browserError,
               queued: queue.length,
               inflight: jobs.size,
               diag,
@@ -203,6 +213,9 @@ export function apply(ctx) {
               );
             }
             if (!device && devices.length === 0) {
+              if (browserState === 'failed' && browserError) {
+                throw new Error('浏览器端连接失败：' + browserError);
+              }
               throw new Error('浏览器没有报告已连接设备，请先在设置页点「连接设备」');
             }
           };
@@ -596,17 +609,31 @@ export function apply(ctx) {
       diag.fetchCalls += 1;
       diag.lastMethod = method;
       lastSeen = now();
-      device = payload.device || null;
-      devices = Array.isArray(payload.devices) ? payload.devices : (device ? [device] : []);
+      const pDev = payload.device || null;
+      const pDevs = Array.isArray(payload.devices) ? payload.devices : (pDev ? [pDev] : []);
+      browserState = payload.state || null;
+      browserError = payload.lastError || null;
+      if (pDev || pDevs.length) {
+        // 有设备：更新并刷新粘性时间
+        device = pDev;
+        devices = pDevs;
+        lastDeviceAt = now();
+      } else if (now() - lastDeviceAt > DEVICE_STICKY_MS) {
+        // 超过粘性窗口仍无设备：认定真正断开
+        device = null;
+        devices = [];
+      }
+      // 窗口内收到 null 时保留上一次已知设备（重连/抖动期间不清）
       diag.lastLog = Array.isArray(payload.log) ? payload.log.slice(-30) : null;
-      // 把最近一次 poll 的 payload 落盘：可以据此判断浏览器跑的客户端版本
-      // （旧客户端只发 device，新客户端还会带 log 数组）
+      diag.pollKeys = Object.keys(payload || {});
       try {
         const snap = process.env.MOBILE_BRIDGE_POLL_SNAPSHOT
-          || path.join(process.env.HOME || '/root', '.dsh', 'mbridge-poll.json');
+          || nodePath.join(process.env.HOME || '/root', '.dsh', 'mbridge-poll.json');
         fs.writeFileSync(snap, JSON.stringify(payload), 'utf8');
-        diag.pollKeys = Object.keys(payload || {});
-      } catch { /* 落盘失败不影响轮询 */ }
+        diag.snapshotError = null;
+      } catch (e) {
+        diag.snapshotError = String((e && e.message) || e);
+      }
       return okValue({ job: queue.shift() || null, deviceSeen: device });
     });
 
@@ -624,7 +651,7 @@ export function apply(ctx) {
       lastSeen = now();
       const lines = Array.isArray(payload.lines) ? payload.lines : [];
       const file = process.env.MOBILE_BRIDGE_HDC_LOG
-        || path.join(process.env.HOME || '/root', '.dsh', 'mbridge-hdc.log');
+        || nodePath.join(process.env.HOME || '/root', '.dsh', 'mbridge-hdc.log');
       try {
         fs.appendFileSync(file, lines.map((l) => String(l)).join('\n') + '\n', 'utf8');
         return okValue({ file, written: lines.length });
@@ -636,11 +663,8 @@ export function apply(ctx) {
     // path 到底要不要带 /api 前缀，文档与实现字面不一致，两种都注册。
     const paths = [
       ['/api/mobile-bridge/poll', pollRoute],
-      ['/mobile-bridge/poll', pollRoute],
       ['/api/mobile-bridge/result', resultRoute],
-      ['/mobile-bridge/result', resultRoute],
       ['/api/mobile-bridge/log', logRoute],
-      ['/mobile-bridge/log', logRoute],
     ];
 
     connCtx.effect(() => {

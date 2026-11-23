@@ -72,6 +72,7 @@ const STATE = {
   kind: null,         // 'adb' | 'hdc'
   log: [],            // HDC 收发日志（失败时显示到输出区）
   notify: null,       // 面板注册的实时刷新回调
+  lastConnectError: null,   // 最近一次连接失败原因（上报给宿主诊断）
   hdcKeyText: '',     // 保留字段（已不再暴露 UI）
   connectToken: 0,    // 每次连接自增；旧任务发现令牌变化即放弃
   connectInFlight: null,  // 串行化：同一时刻只允许一个连接流程
@@ -1012,8 +1013,9 @@ function startBridge(connection) {
           })),
           activeId: STATE.activeId,
           log: STATE.log && STATE.log.length ? STATE.log.slice(-80) : undefined,
+          state: STATE.info ? 'connected' : (STATE.lastConnectError ? 'failed' : ((STATE.hdcPending || STATE.connectInFlight) ? 'connecting' : 'idle')),
+          lastError: STATE.lastConnectError || null,
           build: BUILD_TAG,
-          log: STATE.log && STATE.log.length ? STATE.log.slice(-80) : undefined,
         });
         DIAG.polls += 1;
         DIAG.lastOk = Date.now();
@@ -1278,6 +1280,7 @@ function MobileBridgeSection(props) {
         setInfo(next);
         registerCurrentSession();
         setCmd('param get const.product.model');
+        STATE.lastConnectError = null;
         setPhase('connected');
         return;
       }
@@ -1287,9 +1290,11 @@ function MobileBridgeSection(props) {
       setInfo(next);
       registerCurrentSession();
       setCmd('getprop ro.product.model');
+      STATE.lastConnectError = null;
       setPhase('connected');
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
+      STATE.lastConnectError = raw;
       // 失败时把 USB 真实状态写进日志（我在宿主侧直接读，无需用户复制）
       let usbState = null;
       try { usbState = await dumpUsbState('连接失败后'); } catch { /* ignore */ }
