@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process';
+import * as cliChannel from './lib/cli-channel.js';
 import nodePath from 'node:path';
 import nodeOs from 'node:os';
 import { fileURLToPath as nodeFileURLToPath } from 'node:url';
@@ -38,6 +39,18 @@ export function apply(ctx) {
   let lastSeen = 0;
   let device = null;
   let devices = [];
+  // ---- 本机 CLI 通道（adb/hdc 命令行）----
+  let cliToolsCache = null;
+  const cliState = { activeId: null };
+  async function cliTools() {
+    if (!cliToolsCache) { cliToolsCache = await cliChannel.detectTools(); }
+    return cliToolsCache;
+  }
+  async function cliPickDevice(tools, id) {
+    const list = await cliChannel.listDevices(tools);
+    if (!list.length) { throw new Error('本机没有可用的 adb/hdc 设备（插好手机、开启调试、确认命令行能看到设备）'); }
+    return (id && list.find((d) => d.id === id)) || list.find((d) => d.id === cliState.activeId) || list[0];
+  }
   /** 自诊断：intercept 是否注册成功、match/handler 各被调多少次、看到过什么端点 */
   const diag = {
     connectionService: false,
@@ -193,6 +206,99 @@ export function apply(ctx) {
               throw new Error('浏览器没有报告已连接设备，请先在设置页点「连接设备」');
             }
           };
+
+          // ======== 本机 CLI 通道（adb/hdc 命令行）========
+          if (path === ROUTE_PREFIX + '/cli/status' && req.method === 'GET') {
+            const tools = await cliTools();
+            let cliDevices = [];
+            try { cliDevices = await cliChannel.listDevices(tools); } catch { /* ignore */ }
+            if (cliState.activeId && !cliDevices.find((d) => d.id === cliState.activeId)) { cliState.activeId = null; }
+            if (!cliState.activeId && cliDevices[0]) { cliState.activeId = cliDevices[0].id; }
+            send(res, 200, {
+              ok: true, adb: tools.adb, hdc: tools.hdc,
+              available: !!(tools.adb || tools.hdc),
+              devices: cliDevices, activeId: cliState.activeId,
+            });
+            return;
+          }
+
+          if (path === ROUTE_PREFIX + '/cli/activate' && req.method === 'POST') {
+            const body = await readBody(req);
+            cliState.activeId = String(body.id || '') || null;
+            send(res, 200, { ok: true, activeId: cliState.activeId });
+            return;
+          }
+
+          if (path === ROUTE_PREFIX + '/cli/exec' && req.method === 'POST') {
+            const body = await readBody(req);
+            const cmd = String(body.cmd || '').trim();
+            if (!cmd) { send(res, 400, { ok: false, error: '缺少 cmd' }); return; }
+            const tools = await cliTools();
+            const dev = await cliPickDevice(tools, body.deviceId);
+            const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 30000, 1000), 300000);
+            const r = await cliChannel.execShell(tools, dev, cmd, { timeoutMs });
+            send(res, 200, { ok: true, output: '$ ' + cmd + '\n' + r.text, device: { id: dev.id, kind: dev.kind, serial: dev.serial } });
+            return;
+          }
+
+          if (path === ROUTE_PREFIX + '/cli/screenshot' && req.method === 'POST') {
+            const body = await readBody(req);
+            const tools = await cliTools();
+            const dev = await cliPickDevice(tools, body.deviceId);
+            const shot = await cliChannel.screenshot(tools, dev, { timeoutMs: 90000 });
+            const fs = await import('node:fs/promises');
+            const ext = shot.mime === 'image/jpeg' ? 'jpg' : 'png';
+            const file = `/tmp/mobile-shot-${Date.now()}.${ext}`;
+            await fs.writeFile(file, shot.bytes);
+            send(res, 200, { ok: true, path: file, bytes: shot.bytes.length, base64: shot.bytes.toString('base64'), mime: shot.mime, device: { id: dev.id } });
+            return;
+          }
+
+          if (path === ROUTE_PREFIX + '/cli/push' && req.method === 'POST') {
+            const body = await readBody(req, 128 << 20);
+            if (!body.path || !body.base64) { send(res, 400, { ok: false, error: '缺少 path 或 base64' }); return; }
+            const tools = await cliTools();
+            const dev = await cliPickDevice(tools, body.deviceId);
+            const buf = Buffer.from(String(body.base64), 'base64');
+            const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 600000, 1000), 1800000);
+            const r = await cliChannel.push(tools, dev, buf, String(body.path), { timeoutMs });
+            send(res, 200, { ok: true, bytes: r.bytes, device: { id: dev.id } });
+            return;
+          }
+
+          if (path === ROUTE_PREFIX + '/cli/pull' && req.method === 'POST') {
+            const body = await readBody(req);
+            if (!body.path) { send(res, 400, { ok: false, error: '缺少 path' }); return; }
+            const tools = await cliTools();
+            const dev = await cliPickDevice(tools, body.deviceId);
+            const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 300000, 1000), 1800000);
+            const buf = await cliChannel.pull(tools, dev, String(body.path), { timeoutMs });
+            send(res, 200, { ok: true, bytes: buf.length, base64: buf.toString('base64'), device: { id: dev.id } });
+            return;
+          }
+
+          if (path === ROUTE_PREFIX + '/cli/install' && req.method === 'POST') {
+            const body = await readBody(req, 256 << 20);
+            if (!body.base64) { send(res, 400, { ok: false, error: '缺少 base64' }); return; }
+            const tools = await cliTools();
+            const dev = await cliPickDevice(tools, body.deviceId);
+            const buf = Buffer.from(String(body.base64), 'base64');
+            const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 300000, 1000), 1800000);
+            const out = await cliChannel.install(tools, dev, buf, String(body.filename || ''), !!body.replace, { timeoutMs });
+            send(res, 200, { ok: true, output: out, device: { id: dev.id } });
+            return;
+          }
+
+          if (path === ROUTE_PREFIX + '/cli/uninstall' && req.method === 'POST') {
+            const body = await readBody(req);
+            const pkg = String(body.bundle || '').trim();
+            if (!pkg) { send(res, 400, { ok: false, error: '缺少 bundle' }); return; }
+            const tools = await cliTools();
+            const dev = await cliPickDevice(tools, body.deviceId);
+            const out = await cliChannel.uninstall(tools, dev, pkg);
+            send(res, 200, { ok: true, output: out, device: { id: dev.id } });
+            return;
+          }
 
           if (path === ROUTE_PREFIX + '/exec' && req.method === 'POST') {
             const body = await readBody(req);

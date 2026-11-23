@@ -8,7 +8,7 @@ import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChu
 import { pushFileAdb, pullFileAdb, installApkAdb, uninstallPackageAdb } from './adb/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r109';
+const BUILD_TAG = 'r110';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -1158,6 +1158,12 @@ function MobileBridgeSection(props) {
   const [phase, setPhase] = React.useState((STATE.adb || STATE.hdc) ? 'connected' : 'idle');
   const [kind, setKind] = React.useState(STATE.kind || 'adb');
   const [showFullLog, setShowFullLog] = React.useState(false);
+  const [channel, setChannel] = React.useState('web');   // web | cli
+  const [cliTools, setCliTools] = React.useState(null);
+  const [cliDevices, setCliDevices] = React.useState([]);
+  const [cliActive, setCliActive] = React.useState(null);
+  const [cliLog, setCliLog] = React.useState([]);
+  const [cliBusy, setCliBusy] = React.useState(false);
   const [error, setError] = React.useState('');
   const [info, setInfo] = React.useState(STATE.info);
   const [cmd, setCmd] = React.useState(
@@ -1326,6 +1332,52 @@ function MobileBridgeSection(props) {
     if (!STATE.activeId) { setOut(''); setPhase('idle'); }
   }
 
+  // ---- 本机 CLI 通道操作（走宿主 /mbridge/cli/*）----
+  async function cliRefresh() {
+    try {
+      const r = await fetch('/mbridge/cli/status');
+      const d = await r.json();
+      setCliTools({ adb: d.adb, hdc: d.hdc, available: !!d.available });
+      setCliDevices(d.devices || []);
+      setCliActive(d.activeId || (d.devices && d.devices[0] && d.devices[0].id) || null);
+    } catch (e) { setError('CLI 探测失败：' + (e && e.message ? e.message : e)); }
+  }
+  async function cliActivate(id) {
+    try {
+      await fetch('/mbridge/cli/activate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) });
+      setCliActive(id);
+    } catch { /* ignore */ }
+  }
+  async function cliExec() {
+    if (!cmd || cliBusy) { return; }
+    setCliBusy(true);
+    try {
+      const r = await fetch('/mbridge/cli/exec', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cmd, deviceId: cliActive, timeoutMs: 60000 }) });
+      const d = await r.json();
+      setCliLog((prev) => prev.concat([d.ok ? d.output : ('✗ 错误：' + (d.error || ''))]));
+    } catch (e) {
+      setCliLog((prev) => prev.concat(['✗ 错误：' + (e && e.message ? e.message : e)]));
+    } finally { setCliBusy(false); }
+  }
+  async function cliShot() {
+    if (cliBusy) { return; }
+    setCliBusy(true);
+    try {
+      const r = await fetch('/mbridge/cli/screenshot', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ deviceId: cliActive }) });
+      const d = await r.json();
+      if (d.ok && d.base64) {
+        const bin = atob(d.base64); const arr = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) { arr[i] = bin.charCodeAt(i); }
+        window.open(URL.createObjectURL(new Blob([arr], { type: d.mime || 'image/png' })), '_blank');
+        setCliLog((prev) => prev.concat([`截图完成：${d.bytes} 字节`]));
+      } else {
+        setCliLog((prev) => prev.concat(['✗ 截图失败：' + (d.error || '')]));
+      }
+    } catch (e) {
+      setCliLog((prev) => prev.concat(['✗ 截图失败：' + (e && e.message ? e.message : e)]));
+    } finally { setCliBusy(false); }
+  }
+
   async function runShell() {
     if (!STATE.adb && !STATE.hdc) { setPhase('idle'); return; }
     setBusy(true);
@@ -1413,6 +1465,16 @@ function MobileBridgeSection(props) {
     h('style', { key: 's' }, CSS),
     h('div', { key: 'row', className: 'mb-row' },
       h('button', {
+        key: 'chweb',
+        className: 'mb-btn' + (channel === 'web' ? ' mb-btn--primary' : ''),
+        onClick: () => setChannel('web'),
+      }, t('chWeb')),
+      h('button', {
+        key: 'chcli',
+        className: 'mb-btn' + (channel === 'cli' ? ' mb-btn--primary' : ''),
+        onClick: () => { setChannel('cli'); if (!cliDevices.length) { cliRefresh(); } },
+      }, t('chCli')),
+      h('button', {
         key: 'kacc',
         className: 'mb-btn' + (view === 'account' ? ' mb-btn--primary' : ''),
         onClick: () => setView('account'),
@@ -1450,6 +1512,40 @@ function MobileBridgeSection(props) {
   if (view === 'account') {
     for (const el of buildHuaweiAccountPanel(t)) { children.push(el); }
     children.push(h('div', { key: 'n2', className: 'mb-note' }, t('accountHintShort')));
+    return h('div', { className: 'mb-root' }, children);
+  }
+
+  // ===== 本机 CLI 通道视图 =====
+  if (channel === 'cli') {
+    children.push(h('div', { key: 'cli', className: 'mb-card' },
+      h('div', { className: 'mb-row' },
+        h('button', { className: 'mb-btn mb-btn--primary', onClick: cliRefresh }, t('cliRefresh')),
+        h('span', { className: 'mb-note' }, cliTools
+          ? (cliTools.available
+            ? ('adb ' + (cliTools.adb ? '✓' : '✗') + '  hdc ' + (cliTools.hdc ? '✓' : '✗'))
+            : t('cliNotFound'))
+          : ''),
+      ),
+      h('div', { style: { marginTop: '10px' } }, cliDevices.length
+        ? cliDevices.map((d) => h('button', {
+            key: d.id,
+            className: 'mb-btn' + (d.id === cliActive ? ' mb-btn--primary' : ''),
+            style: { marginRight: '8px', marginBottom: '6px' },
+            onClick: () => cliActivate(d.id),
+          }, (d.kind === 'hdc' ? '鸿蒙 ' : '安卓 ') + (d.model || d.serial)))
+        : h('div', { className: 'mb-note' }, cliTools ? t('cliNoDev') : t('cliHint'))),
+      h('div', { className: 'mb-row', style: { marginTop: '10px' } },
+        h('input', {
+          className: 'mb-input', value: cmd, spellCheck: false,
+          onChange: (e) => setCmd(e.target.value),
+          onKeyDown: (e) => { if (e.key === 'Enter' && !cliBusy) { cliExec(); } },
+        }),
+        h('button', { className: 'mb-btn', disabled: cliBusy || !cliActive, onClick: cliExec }, t('run')),
+        h('button', { className: 'mb-btn', disabled: cliBusy || !cliActive, onClick: cliShot }, t('screenshot')),
+      ),
+      h('pre', { className: 'mb-out', style: { maxHeight: '320px', marginTop: '10px' } },
+        cliLog.length ? cliLog.join('\n') : t('noLog')),
+    ));
     return h('div', { className: 'mb-root' }, children);
   }
 
@@ -1625,6 +1721,12 @@ export function apply(ctx) {
       sysVersion: '系统版本',
       deviceLog: '设备日志',
       fullLog: '完整日志（开发者）',
+      chWeb: '浏览器',
+      chCli: '本机命令行',
+      cliRefresh: '刷新本机设备',
+      cliNotFound: '未找到 adb/hdc（装 DevEco / Platform-Tools，或确认在 PATH）',
+      cliNoDev: '（没有可用设备：插好手机、开启 USB 调试，确认命令行能看到）',
+      cliHint: '点「刷新本机设备」自动探测 adb/hdc',
       noLog: '（暂无日志）',
       accountTitle: '华为账号登录',
       accountHintShort: '登录态保存在本机，插件重载、切页、重连手机都不需要重新登录。',
@@ -1700,6 +1802,12 @@ export function apply(ctx) {
       sysVersion: 'OS version',
       deviceLog: 'Device log',
       fullLog: 'Full log (developer)',
+      chWeb: 'Browser',
+      chCli: 'Local CLI',
+      cliRefresh: 'Refresh local devices',
+      cliNotFound: 'adb/hdc not found (install DevEco / Platform-Tools or ensure on PATH)',
+      cliNoDev: '(no device: plug in phone, enable USB debugging, ensure the CLI sees it)',
+      cliHint: 'Click "Refresh local devices" to detect adb/hdc',
       noLog: '(no log yet)',
       accountTitle: 'Huawei account sign-in',
       accountHintShort: 'The session is stored on this machine; reloading, switching pages or reconnecting the phone needs no new sign-in.',

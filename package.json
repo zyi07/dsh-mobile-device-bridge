@@ -47,6 +47,6 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "test": "node src-client/hdc/codec.test.mjs && node src-client/hdc/transport.test.mjs && node src-client/hdc/session.test.mjs && node src-client/hdc/multi-device.test.mjs"
+    "test": "node src-client/hdc/codec.test.mjs && node src-client/hdc/transport.test.mjs && node src-client/hdc/session.test.mjs && node src-client/hdc/multi-device.test.mjs && node lib/cli-channel.test.mjs"
   }
 }

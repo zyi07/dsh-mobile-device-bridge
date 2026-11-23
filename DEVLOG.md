@@ -1453,3 +1453,25 @@ model/api 全探测失败，走 fallback。修复：`connectHarmony` 把 token �
 - 兜底 `const.product.software.version` = `PLA-AL10 7.0.0.111(SP12C00E111R9P3)`
 sysVersion 改为 `HarmonyOS 7.0.0.111`；另把 api 探测的候选去掉 software.version（避免 api 被版本号污染）。
 构建 r109。
+
+## 2026-11-23 11:50 - 双通道：本机 CLI 通道（adb/hdc 命令行）（r110）
+
+桌面端（Electron）WebUSB 受限，改为可走本机命令行。新增**第二条通道**（WebUSB 通道完全不动）。
+
+**新增 `lib/cli-channel.js`：**
+- `detectTools()`：自动探测 adb/hdc（PATH 的 where/which + Windows 常见安装位：
+  `%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe`、
+  `%LOCALAPPDATA%\Huawei\DevEco Studio\sdk\default\openharmony\toolchains\hdc.exe` 等；Linux/macOS 同理）
+- `listDevices`：`adb devices -l` + `hdc list targets`，跳过 unauthorized
+- `execShell / screenshot / push / pull / install / uninstall`：adb/hdc 命令封装
+  （截图 adb 用 exec-out screencap，hdc 用 snapshot_display + file recv；文件用临时文件中转）
+
+**index.js 新增 `/mbridge/cli/*` 路由**（与 WebUSB 的 `/mbridge/*` 并存，互不影响）：
+`status`（探测+列设备）、`activate`、`exec`、`screenshot`、`push`、`pull`、`install`、`uninstall`。
+
+**UI：** 顶部加通道切换「浏览器 / 本机命令行」；CLI 视图有「刷新本机设备」、设备 chip、
+命令执行、截图。`platform` 无关，web 桌面端都能用（只要有 adb/hdc）。
+
+**测试：** `lib/cli-channel.test.mjs` 用假 adb/hdc 脚本离线验证探测/列设备/exec/push/pull/install/uninstall/错误路径（全绿）。
+
+构建 r110。Linux 本机已装 adb 可真测探测；真机连接需 Windows/有设备的机器。
