@@ -19,17 +19,29 @@
 import asyncio
 import base64
 import io
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode, unquote
 import json
 import os
+import re
 import sys
 import time
+import urllib.request
 
 CHROME = os.environ.get("AGC_CHROME", "/usr/bin/chromium-browser")
 AGC_URL = "https://developer.huawei.com/consumer/cn/service/josp/agc/index.html"
 COOKIE_FILE = os.environ.get("AGC_COOKIE_FILE", "/root/.dsh/agc-session.json")
 QR_MAX_AGE = 55          # 秒，超时就重新截一张（华为二维码约 2 分钟失效）
 LOGIN_TIMEOUT = 480      # 秒，超时判定失败（8 分钟）
+
+# ---- DevEco Studio 官方授权链路（与 IDE「自动签名」用的是同一条）----
+# 打开 apply 页 → 华为账号登录（二维码/密码）→ 回调 127.0.0.1:<port>/?tempToken=…
+# → temptoken/check 换成 JWT。小白助手之类工具弹网页做的也是这件事。
+DEVECO_APPLY = "https://cn.devecostudio.huawei.com/console/DevEcoIDE/apply"
+DEVECO_APPID = "1009"
+DEVECO_SITE = "CN"
+DEVECO_VERSION = os.environ.get("DEVECO_VERSION", "1.0.0")
+TOKEN_CHECK = ("https://cn.devecostudio.huawei.com/authrouter/auth/api/"
+               "temptoken/check")
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -39,6 +51,26 @@ def _to_png(img) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
+
+def _rand_code() -> str:
+    """apply 页要求的 32 位随机 hex（每次会话一个新值）"""
+    return os.urandom(16).hex()
+
+
+# 在页面里一次求值找出二维码元素（实测是 128×128 的 <img>），返回页面坐标
+_QR_BOX_JS = """() => {
+  let best = null;
+  for (const el of document.querySelectorAll('canvas, img')) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 100 || r.height < 100) continue;
+    if (r.width > 420 || r.height > 420) continue;
+    if (Math.abs(r.width - r.height) > 24) continue;
+    if (r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth) continue;
+    if (!best || r.width > best[2]) best = [r.x + scrollX, r.y + scrollY, r.width, r.height];
+  }
+  return best;
+}"""
 
 
 def is_on_agc(url: str) -> bool:
@@ -75,6 +107,12 @@ class LoginSession:
         self.phase = "waiting"    # waiting | scanned | expired（仅扫码模式）
         self.qr_page_expired = False   # 截这张二维码时，页面上是否显示"已过期"
         self.loop = None
+        # OAuth 回调
+        self.oauth_port = 0
+        self.oauth_url = ""
+        self.temp_token = ""
+        self._cb_server = None
+        self.jwt = ""
 
     async def start(self, mode="qr", force=False):
         # 只有"刚生成不到 25 秒"的会话才复用；否则重开，避免返回一张过期二维码
@@ -98,35 +136,215 @@ class LoginSession:
             **({"storage_state": _state} if _state else {}),
         )
         self.page = await self.ctx.new_page()
-        await self.page.goto(AGC_URL, wait_until="domcontentloaded", timeout=45000)
-        await self.page.wait_for_timeout(3000)
 
-        # 已登录就不会出现「登录」按钮
-        if await self._already_logged_in():
-            await self._finish_success("cookie 已存在，无需重新登录")
+        # ① 起本地回调服务：华为登录成功后 302 到 127.0.0.1:<port>/?tempToken=…
+        await self._start_callback_server()
+        url = (f"{DEVECO_APPLY}?port={self.oauth_port}"
+               f"&appid={DEVECO_APPID}&code={_rand_code()}")
+        self.oauth_url = url
+        self.temp_token = ""
+        try:
+            await self.page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        except Exception as e:
+            self.state = "failed"
+            self.message = f"打开 DevEco 授权页失败: {str(e)[:120]}"
             return
-
-        try:
-            await self.page.get_by_text("登录", exact=True).first.click(timeout=8000)
-        except Exception:
-            # 兜底：直接跳到登录页
-            await self.page.goto(
-                "https://developer.huawei.com/consumer/cn/service/josp/agc/index.html",
-                wait_until="domcontentloaded")
-            await self.page.get_by_text("登录", exact=True).first.click(timeout=8000)
-
-        # 等登录页真正出来（URL 变成 CAS 登录页）
-        try:
-            await self.page.wait_for_url("**/loginAuth.html**", timeout=25000)
-        except Exception:
-            pass
+        # 授权页会自己 302 到 CAS 登录页（二维码就在那里），不需要点任何按钮
         self.started_at = time.time()
         self.state = "waiting"
         if self._ticker_task is None or self._ticker_task.done():
             self._ticker_task = asyncio.create_task(self.ticker())
-        ok = await self._capture_qr()
-        if not ok:
-            self.message = (self.message or "") + "（可点「刷新二维码」重试）" 
+        got = await self._settle_and_pick()
+        if got == "token":
+            return
+        if got != "qr":
+            self.message = ((self.message or "二维码没出来")
+                            + "（可点「刷新二维码」重试）")
+
+    # ---------- OAuth loopback ----------
+    async def _page_text(self):
+        try:
+            return await self.page.evaluate(
+                "() => (document.body && document.body.innerText) || ''")
+        except Exception:
+            return ""
+
+    async def _consent_pending(self):
+        """已登录华为帐号时，apply 页不会出二维码，而是停在授权确认页：
+        「DevEco CLI 想要访问您的华为帐号」+「允许」。点掉它才会回调 tempToken。"""
+        body = await self._page_text()
+        return ("想要访问您的华为帐号" in body or "允许DevEco" in body
+                or "允许 DevEco" in body)
+
+    async def _click_allow(self):
+        """点授权确认页的「允许」。
+
+        实测这个按钮是 `<div id="btn-confirm" class="btn-consent btn-confirm">`
+        —— 用 text=允许 点它无效（事件绑在 div 上，点中的是内层文本），
+        必须按 class/id 点，或者在页面里直接派发 click 事件。
+        """
+        if not self.page:
+            return False
+        try:
+            if await self.page.locator(".btn-consent.btn-confirm").count():
+                try:
+                    await self.page.locator(".btn-consent.btn-confirm").first.click(timeout=5000)
+                    return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            r = await self.page.evaluate("""() => {
+                const el = document.querySelector('.btn-consent.btn-confirm, #btn-confirm');
+                if (!el) return false;
+                el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                el.click();
+                return true;
+            }""")
+            if r:
+                return True
+        except Exception:
+            pass
+        return False
+
+    async def _start_callback_server(self):
+        """监听 127.0.0.1:<随机端口>，接华为登录成功后的 tempToken 回调。"""
+        if self._cb_server:
+            try:
+                self._cb_server.close()
+            except Exception:
+                pass
+            self._cb_server = None
+
+        async def handle(reader, writer):
+            """接华为的回调。实测是 `POST /callback`，tempToken 在请求体里
+            （不是 GET/?tempToken=…）—— 只读第一行会永远拿不到 token。"""
+            try:
+                buf = b""
+                while b"\r\n\r\n" not in buf and len(buf) < 65536:
+                    chunk = await asyncio.wait_for(reader.read(4096), timeout=10)
+                    if not chunk:
+                        break
+                    buf += chunk
+                head, _, rest = buf.partition(b"\r\n\r\n")
+                text = head.decode("utf-8", "replace")
+                first = text.split("\r\n", 1)[0] if text else ""
+                clen = 0
+                for ln in text.split("\r\n")[1:]:
+                    if ln.lower().startswith("content-length:"):
+                        try:
+                            clen = int(ln.split(":", 1)[1].strip())
+                        except Exception:
+                            clen = 0
+                while clen and len(rest) < clen:
+                    chunk = await asyncio.wait_for(reader.read(4096), timeout=10)
+                    if not chunk:
+                        break
+                    rest += chunk
+                body_text = rest.decode("utf-8", "replace")
+                if os.environ.get("AGC_DEBUG"):
+                    sys.stderr.write("[callback] %s | body=%r\n"
+                                     % (first[:200], body_text[:300]))
+                    sys.stderr.flush()
+                blob = first + "&" + body_text
+                m = re.search(r'tempToken["\']?\s*[:=]\s*["\']?([A-Za-z0-9._\-]+)', blob)
+                if m:
+                    self.temp_token = m.group(1)
+                html = ("<html><head><meta charset='utf-8'><title>登录完成</title></head>"
+                        "<body style='font-family:system-ui;padding:48px;text-align:center'>"
+                        "<h2>登录完成</h2><p>可以关闭此页面，回到 DSH 继续。</p>"
+                        "</body></html>").encode("utf-8")
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                             b"Content-Length: " + str(len(html)).encode() +
+                             b"\r\nConnection: close\r\n\r\n" + html)
+                await writer.drain()
+            except Exception:
+                pass
+            finally:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+
+        # 页面回调用的是 http://localhost:<port>/callback，Chrome 可能解析到 ::1，
+        # 只绑 127.0.0.1 会连不上 → 两个回环地址都绑。
+        self._cb_server = await asyncio.start_server(handle, ["127.0.0.1", "::1"], 0)
+        self.oauth_port = self._cb_server.sockets[0].getsockname()[1]
+
+    async def _exchange_temp_token(self, temp_token):
+        """tempToken → JWT（与 DevEco Studio 同一个接口）"""
+        q = urlencode({"tempToken": temp_token, "site": DEVECO_SITE,
+                       "version": DEVECO_VERSION, "appid": DEVECO_APPID})
+        url = f"{TOKEN_CHECK}?{q}"
+
+        def _do():
+            req = urllib.request.Request(url, headers={
+                "User-Agent": UA, "Accept": "application/json, text/plain, */*",
+                "Origin": "https://cn.devecostudio.huawei.com",
+                "Referer": "https://cn.devecostudio.huawei.com/",
+            })
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.read().decode("utf-8", "replace")
+
+        raw = (await asyncio.to_thread(_do)).strip()
+        # 实测：这个接口成功时**直接返回 JWT 字符串**（eyJ…三段），不是 JSON
+        if raw.startswith("eyJ") and raw.count(".") == 2:
+            self.jwt = raw
+            return raw
+        if raw.startswith('"') and raw.endswith('"') and raw.count(".") >= 2:
+            self.jwt = raw.strip('"')
+            return self.jwt
+        try:
+            data = json.loads(raw)
+        except Exception:
+            raise RuntimeError(f"temptoken/check 返回无法解析: {raw[:200]}")
+        # 常见形态：{"ret":{"code":0},"token":"..."} / {"jwtToken":"..."} / 直接是字符串
+        token = ""
+        for k in ("token", "jwtToken", "jwt", "accessToken", "data"):
+            v = data.get(k) if isinstance(data, dict) else None
+            if isinstance(v, str) and v.count(".") == 2 and len(v) > 100:
+                token = v
+                break
+            if isinstance(v, dict):
+                for kk in ("token", "jwtToken", "jwt", "accessToken"):
+                    if isinstance(v.get(kk), str) and v[kk].count(".") == 2:
+                        token = v[kk]
+                        break
+            if token:
+                break
+        if not token:
+            raise RuntimeError(f"没换到 JWT: {raw[:300]}")
+        self.jwt = token
+        return token
+
+    async def _save_session(self, message=""):
+        """保存登录态：JWT + Cookie（JWT 才是调 AGC API 的凭证）"""
+        cookies = []
+        try:
+            cookies = await self.ctx.cookies()
+        except Exception:
+            pass
+        payload = {
+            "jwt": self.jwt,
+            "cookieHeader": "; ".join(f"{c['name']}={c['value']}" for c in cookies),
+            "csrf": next((c["value"] for c in cookies if c["name"] == "csrfToken"), ""),
+            "cookies": [{k: c[k] for k in ("name", "value", "domain", "path")} for c in cookies],
+            "savedAt": time.time(),
+            "source": "deveco-oauth",
+            "url": self.page.url if self.page else "",
+        }
+        os.makedirs(os.path.dirname(COOKIE_FILE) or ".", exist_ok=True)
+        with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        try:
+            os.chmod(COOKIE_FILE, 0o600)
+        except Exception:
+            pass
+        self.state = "success"
+        self.message = message or "登录成功，凭证已保存"
+        return payload
 
     # ---------- 账号密码登录 ----------
     # ---------- 遥控浏览器（滑块验证由用户亲手完成）----------
@@ -272,9 +490,22 @@ class LoginSession:
         await self._after_submit()
 
     async def _already_logged_in(self):
+        """真正判断是否已登录：不能只看"没有登录按钮（加载中的登录页也没有）"。
+        必须 URL 在 AGC 域、不在 OAuth/登录域、且页面出现 AGC 后台特征。"""
         try:
+            url = (self.page.url or "")
+            if any(k in url for k in ("loginAuth", "oauth-login", "remoteLogin", "handleAllianceLogin", "loginCallback")):
+                return False
+            if "developer.huawei.com" not in url:
+                return False
             n = await self.page.get_by_text("登录", exact=True).count()
-            return n == 0
+            if n > 0:
+                return False
+            try:
+                body = (await self.page.inner_text("body"))[:5000]
+            except Exception:
+                body = ""
+            return any(k in body for k in ("证书", "Profile", "应用上架", "我的项目", "我的应用", "开发服务"))
         except Exception:
             return False
 
@@ -366,67 +597,106 @@ class LoginSession:
     def _looks_blank(png: bytes) -> bool:
         return LoginSession._dark_ratio(png) < 0.03
 
-    async def _capture_qr(self):
-        """取一张**确认含二维码**的图。
+    def _set_qr(self, png: bytes):
+        self.qr_b64 = base64.b64encode(png).decode()
+        self.qr_at = time.time()
+        self.qr_page_expired = False
+        self.message = ""
 
-        验收标准：黑色像素占比 >= 5%。整页大小、文件大小都不能作为判据。
+    async def _capture_qr(self, attempts=20):
+        """取一张**确认含二维码**的图。实测 10 秒左右就能拿到。
+
+        判据只有一个：裁出来的图里深色像素占比 >= 5%。
+        旧实现按 6 个 CSS 选择器逐个试、每个最多等 6 秒，选择器一旦对不上
+        就要卡满 8 分钟 —— 面板一直转圈，这就是「点了没反应」的根因。
+        现在：一次 JS 求值找出够大的 canvas/img → 按包围盒裁剪截图；
+        拿不到再退回整页截图 + 实测坐标（1280×900 下二维码在 384,270，128×128）。
         """
-        for attempt in range(1, 15):
-            if not self.page:
-                return False
+        if not self.page:
+            return False
+        last_full = None
+        for attempt in range(1, max(1, attempts) + 1):
             try:
-                # ① 先直接截二维码元素（最可靠）
-                for sel in (".hwid-qrCode-root", ".hwid-qrcode-full-box",
-                            ".hwid-qrCode-root canvas", "canvas", "img[src*='qr']"):
-                    try:
-                        loc = self.page.locator(sel).first
-                        if await loc.count() == 0:
-                            continue
-                        if not await loc.is_visible():
-                            continue
-                        png = await loc.screenshot(timeout=6000)
-                        png = self._normalize_qr(png)
-                        ratio = self._dark_ratio(png)
-                        if ratio >= 0.05:
-                            self.qr_b64 = base64.b64encode(png).decode()
-                            self.qr_at = time.time()
-                            self.qr_page_expired = False
-                            self.message = ""
-                            return True
-                    except Exception:
-                        continue
-                # ② 退而求其次：整页截图 + 二维码元素包围盒裁剪
-                box = await self._qr_box()
-                png = await self.page.screenshot()
+                box = None
+                try:
+                    box = await self.page.evaluate(_QR_BOX_JS)
+                except Exception:
+                    box = None
                 if box:
                     try:
-                        from PIL import Image
-                        img = Image.open(io.BytesIO(png))
-                        x1, y1, x2, y2 = [int(v) for v in box]
-                        crop = img.crop((x1, y1, x2, y2))
-                        crop = crop.resize((580, 580), Image.LANCZOS)
-                        buf = io.BytesIO(); crop.save(buf, format="PNG")
-                        cand = buf.getvalue()
-                        if self._dark_ratio(cand) >= 0.05:
-                            self.qr_b64 = base64.b64encode(cand).decode()
-                            self.qr_at = time.time()
-                            self.qr_page_expired = False
-                            self.message = ""
+                        png = await self.page.screenshot(clip={
+                            "x": float(box[0]), "y": float(box[1]),
+                            "width": float(box[2]), "height": float(box[3])})
+                        png = self._normalize_qr(png)
+                        if self._dark_ratio(png) >= 0.05:
+                            self._set_qr(png)
                             return True
                     except Exception:
                         pass
+                # 兜底：整页截图 + 固定区域裁剪
+                try:
+                    from PIL import Image
+                    full = await self.page.screenshot()
+                    last_full = full
+                    img = Image.open(io.BytesIO(full))
+                    crop = img.crop((352, 240, 545, 433)).resize((580, 580), Image.LANCZOS)
+                    buf = io.BytesIO()
+                    crop.save(buf, format="PNG")
+                    cand = buf.getvalue()
+                    if self._dark_ratio(cand) >= 0.05:
+                        self._set_qr(self._normalize_qr(cand))
+                        return True
+                except Exception:
+                    pass
                 self.message = f"二维码还没渲染好（第 {attempt} 次），稍候…"
             except Exception as e:
                 self.message = f"截图失败（第 {attempt} 次）: {str(e)[:100]}"
-            # 每 3 次尝试点一下刷新，逼页面重绘
-            if attempt % 3 == 0:
-                await self._click_refresh()
             await self.page.wait_for_timeout(1200)
+        # 抓不到就把当时的整页截图落盘，方便排查（不然只能猜）
+        if last_full:
+            try:
+                dbg = os.environ.get("AGC_DEBUG_SHOT", "/tmp/agc_qr_fail.png")
+                with open(dbg, "wb") as f:
+                    f.write(last_full)
+                self.message += f"（已存截图 {dbg}）"
+            except Exception:
+                pass
         # 彻底拿不到：清空图片（绝不把白板发给前端），但**不判死会话**，
         # 保持等待状态，让后台 ticker 继续重试；用户也可以点「开始登录」重开。
         self.qr_b64 = ""
         self.message = "二维码暂时取不到，正在后台重试…（也可点「开始登录」重开）"
         return False
+
+    async def _settle_and_pick(self):
+        """apply 页打开后还会再跳一次（→ CAS 登录页，或已登录 → 授权确认页）。
+
+        这段时间 page.evaluate 会抛 "Execution context was destroyed"，
+        所以必须在一个循环里反复试：看到确认页就点「允许」，看到二维码就截，
+        拿到 tempToken 就结束。这样才不会被中间态卡住。
+        """
+        for _ in range(25):
+            if self.temp_token:
+                return "token"
+            await self.page.wait_for_timeout(1000)
+            try:
+                body = await self._page_text()
+            except Exception:
+                continue
+            if body and ("想要访问您的华为帐号" in body or "允许DevEco" in body):
+                self.message = "华为帐号已登录，正在完成授权…"
+                if await self._click_allow():
+                    self.message = "已点「允许」，正在取凭证…"
+                    for _ in range(15):
+                        if self.temp_token:
+                            return "token"
+                        await self.page.wait_for_timeout(600)
+                    # 授权后通常会跳到 127.0.0.1 回调页
+                    if "127.0.0.1" in (self.page.url or ""):
+                        return "token"
+                continue
+            if await self._capture_qr(attempts=1):
+                return "qr"
+        return ""
 
     async def _finish_success(self, message=""):
         cookies = await self.ctx.cookies()
@@ -499,10 +769,23 @@ class LoginSession:
             self.state = "failed"
             self.message = "会话未启动"
             return
+        # ★ 扫码成功的唯一可靠信号：本地回调收到 tempToken
+        if self.temp_token:
+            try:
+                self.message = "扫码成功，正在换取登录凭证…"
+                await self._exchange_temp_token(self.temp_token)
+                await self._save_session("扫码登录成功，凭证已保存")
+            except Exception as e:
+                self.state = "failed"
+                self.message = f"换取凭证失败: {str(e)[:160]}"
+            return
         url = self.page.url
-        # 登录成功后会被带回 AGC。
-        # 注意：跳转回来的 URL 查询参数里仍可能带着 loginUrl=...loginAuth.html，
-        # 所以只能看 hostname + path，不能对整条 URL 做 "loginAuth not in url" 判断。
+        # 授权确认页（华为帐号已登录时出现，没有二维码）→ 直接点「允许」
+        if await self._consent_pending():
+            self.message = "华为帐号已登录，正在完成授权…"
+            if await self._click_allow():
+                return
+        # 兜底：万一回调没接住但浏览器已经回到 DevEco/AGC
         if is_on_agc(url):
             await self._finish_success("已返回 AGC，登录态已保存")
             return
@@ -533,6 +816,12 @@ class LoginSession:
         if self._ticker_task:
             self._ticker_task.cancel()
             self._ticker_task = None
+        if self._cb_server:
+            try:
+                self._cb_server.close()
+            except Exception:
+                pass
+            self._cb_server = None
         for obj, fn in ((self.ctx, "close"), (self.browser, "close"), (self.pw, "stop")):
             try:
                 if obj:
@@ -554,10 +843,12 @@ class LoginSession:
             out["qrLeft"] = max(0, 110 - age)     # 华为二维码约 2 分钟有效，这里给保守值
         if self.state == "success":
             out["cookieFile"] = COOKIE_FILE
+            out["hasJwt"] = bool(self.jwt)
             try:
                 with open(COOKIE_FILE, encoding="utf-8") as f:
                     d = json.load(f)
                 out["cookieCount"] = len(d.get("cookies") or [])
+                out["hasJwt"] = bool(d.get("jwt"))
             except Exception:
                 out["cookieCount"] = 0
         return out

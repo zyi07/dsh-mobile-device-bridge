@@ -1634,21 +1634,23 @@ function MobileBridgeSection(props) {
     if (info.kind === 'hdc') children.push(h('details', { key: 'locinstall', className: 'mb-card', style: { marginTop: '10px' } },
       h('summary', { style: { cursor: 'pointer', userSelect: 'none' } }, '本地安装（推荐：用电脑上的 hdc.exe）'),
       h('div', { className: 'mb-note', style: { marginTop: '6px', lineHeight: 1.7 } },
-        '如果 WebUSB 一直报「设备被独占」，用这个方法：下载已签名的安装包，'
-        + '用你电脑上 DevEco 自带的 hdc.exe 安装。hdc 自己占用设备，不经过浏览器，不会冲突。'),
+        '如果 WebUSB 一直报「设备被独占」，可以先验证 hdc 安装链路：下载下面的'
+        + '示例包，用你电脑上 DevEco 自带的 hdc.exe 安装。hdc 自己占用设备，不经过浏览器。'),
       h('div', { className: 'mb-row', style: { marginTop: '8px' } },
         h('a', {
           className: 'mb-btn',
           href: '/mbridge/agc/hap',
           download: 'dsh_demo_signed.hap',
           style: { textDecoration: 'none', display: 'inline-block' },
-        }, '下载签名包（9.9 MB）'),
+        }, '下载示例包（9.9 MB）'),
       ),
       h('div', { className: 'mb-note', style: { marginTop: '10px' } }, '下载完成后，在 PowerShell 里运行这一条：'),
       h('pre', { className: 'mb-out', style: { whiteSpace: 'pre-wrap', userSelect: 'all' } },
         '& "C:\\Program Files\\Huawei\\DevEco Studio\\sdk\\default\\openharmony\\toolchains\\hdc.exe" install -r "$env:USERPROFILE\\Downloads\\dsh_demo_signed.hap"'),
       h('div', { className: 'mb-note', style: { marginTop: '6px' } },
-        '包名 com.dsh.bridgeapp，已用你的调试证书签名，调试 Profile 里绑定了你这台手机（<DEVICE_UDID>）。'),
+        '说明：这是打包时固定生成的示例包，包名 com.dsh.bridgeapp，签名材料绑定的是开发机那台设备。'
+        + '它只能用来验证 hdc 安装链路通不通，不能安装你自己的应用。'
+        + '「针对任意应用自动申请证书 / Profile 并签名」的能力还没做完，别把它当成能用。'),
     ));
 
     children.push(h('div', { key: 'sh', className: 'mb-row' },
@@ -1735,14 +1737,14 @@ export function apply(ctx) {
       noLog: '（暂无日志）',
       accountTitle: '华为账号登录',
       accountHintShort: '登录态保存在本机，插件重载、切页、重连手机都不需要重新登录。',
-      accountHint: '用手机「控制中心 → 扫一扫」扫码登录华为开发者账号。登录态保存在本机，下次无需重复扫码。注意：调试证书与 Profile 由 AGC 签发，本插件负责保存登录态、传输与安装已签名 HAP。',
+      accountHint: '用手机「控制中心 → 扫一扫」扫码登录华为开发者账号，登录态只保存在本机。当前版本只做到「登录 + 保存凭证」；自动申请调试证书 / Profile 还没做完，不能替你给任意应用签名。',
       accountStatusOk: '已登录',
       accountStatusNone: '未登录',
       accountRelogin: '重新登录',
       accountPersistTitle: '登录态如何保存',
       accountPersistHint: '登录态保存在本机（~/.dsh/agc-session.json，权限 600），不会上传到任何地方。\n插件重载、切换页面、重连手机都不需要重新登录；只有你点「退出登录」或华为侧会话失效时才需要再扫一次。',
       agcTitle: '华为账号登录（管理登录态）',
-      agcHint: '用手机「控制中心 → 扫一扫」扫码登录华为开发者账号。登录态只保存在本机，用于自动申请调试证书与 Profile；不需要你手工准备已签名的 HAP。',
+      agcHint: '用手机「控制中心 → 扫一扫」扫码登录华为开发者账号，登录态只保存在本机、不上传。自动申请调试证书与 Profile 的功能仍在开发中，当前版本还不能替你签名任意应用。',
       agcLogin: '开始登录（显示二维码）',
       agcRefresh: '刷新二维码',
       agcLogout: '清除登录态',
