@@ -1248,3 +1248,20 @@ while (!stopped) {
 - 队列上限 32，避免堆积
 
 构建 r93。
+
+## 2026-11-23 09:35 - Android 安装改为后台执行 + 自动点「继续安装」（r94）
+
+**根因确认（截图）：** `pm install` 卡在华为的「风险提示 → 继续安装」确认框，
+前台执行会把 shell 通道和任务队列一起堵死（虽然 r93 已让轮询不受影响，
+但 runner 串行仍被这个任务占住，后续命令全部超时）。
+
+**修复：**
+1. `installApkAdb` 改为 **`nohup pm install ... &` 后台执行 + 立即返回**；
+   宿主侧每 1.5s 轮询一次（单条短命令）：`uiautomator dump` 找「继续安装」按钮，
+   解析 `bounds` 算出中心坐标后 `input tap` 点掉，同时回读安装日志判断 Success/Failure。
+2. runner 增加**任务级 6 分钟超时兜底**，任何任务卡死都不会无限堵队列。
+3. 错误码补充 `INSTALL_FAILED_INVALID_APK / USER_RESTRICTED / VERIFICATION_FAILURE`。
+
+**已确认：**「继续安装」按钮 bounds = `[551,2156][1009,2258]`，中心 (780,2207)，动态解析不写死。
+
+构建 r94。

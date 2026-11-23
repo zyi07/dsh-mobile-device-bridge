@@ -8,7 +8,7 @@ import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChu
 import { pushFileAdb, pullFileAdb, installApkAdb, uninstallPackageAdb } from './adb/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r93';
+const BUILD_TAG = 'r94';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -869,7 +869,12 @@ function startBridge(connection) {
       const job = queue.shift();
       let outcome;
       try {
-        outcome = await runJob(job);
+        // 任务级超时兜底：任何单个任务最多 6 分钟，超时后放弃，绝不无限堵队列
+        outcome = await Promise.race([
+          runJob(job),
+          new Promise((_, rej) => setTimeout(
+            () => rej(new Error('任务超时（6 分钟），已放弃')), 360000)),
+        ]);
       } catch (e) {
         outcome = { ok: false, error: String(e && e.message ? e.message : e) };
       }
