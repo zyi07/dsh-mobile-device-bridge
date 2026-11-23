@@ -8,7 +8,7 @@ import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChu
 import { pushFileAdb, pullFileAdb, installApkAdb, uninstallPackageAdb } from './adb/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r107';
+const BUILD_TAG = 'r108';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -600,7 +600,7 @@ async function connectHarmony(device, token) {
     await flushHdcLog();          // 先落一条，确保宿主侧能看到"这次确实跑了"
     const t = new HdcTransport(dev, { logger: pushHdcLog });
     try {
-      return await connectHarmonyInner(t, dev);
+      return await connectHarmonyInner(t, dev, token);
     } catch (e) {
       // 失败必须释放：否则设备句柄留在 open 状态，之后每次 claim 都会失败
       try { await t.close(); } catch { /* ignore */ }
@@ -637,7 +637,7 @@ async function connectHarmony(device, token) {
   throw lastErr;
 }
 
-async function connectHarmonyInner(t, device) {
+async function connectHarmonyInner(t, device, token) {
   t.emit('INFO', `vid=0x${device.vendorId.toString(16)} pid=0x${device.productId.toString(16)} `
     + `serial="${device.serialNumber || ''}" 版本=${DAEMON_VERSION}`); 
   // 密钥：复用浏览器里保存的（同一把只授权一次），没有就生成并保存
@@ -1163,9 +1163,17 @@ function MobileBridgeSection(props) {
   );
   // 诊断心跳：DIAG 是模块级对象，没有它面板不会重渲染
   const [, setTick] = React.useState(0);
+  // 把一段文本追加到当前设备日志（STATE.log 即当前活跃设备的日志数组引用）
+  function appendToLog(text) {
+    try {
+      if (!STATE.log) { STATE.log = []; }
+      STATE.log.push(String(text));
+      setTick((n) => n + 1);
+    } catch { /* ignore */ }
+  }
   React.useEffect(() => {
     const id = setInterval(() => setTick((n) => n + 1), 2000);
-    STATE.notify = (text) => setOut(text);
+    STATE.notify = () => setTick((n) => n + 1);
     agcRestoreSession();      // 打开设置页就把已保存的华为登录态读回来
     return () => { clearInterval(id); if (STATE.notify) { STATE.notify = null; } };
   }, []);
@@ -1284,7 +1292,6 @@ function MobileBridgeSection(props) {
       const logText = (STATE.log && STATE.log.length)
         ? STATE.log.join('\n')
         : '（本次未产生收发日志：说明失败发生在创建传输层之前）';
-      setOut(logText);
       try {
         // 方便用户直接粘贴给开发者：失败即把完整日志放进剪贴板
         await navigator.clipboard.writeText(logText);
@@ -1316,7 +1323,7 @@ function MobileBridgeSection(props) {
     try {
       const text = await execShell(cmd);
       if (STATE.connectToken !== token) { return; }   // 连接已切换，丢弃旧结果
-      setOut(text);
+      appendToLog(text);
     } catch (e) {
       const raw = String(e && e.message ? e.message : e);
       // 失败时把 USB 真实状态写进日志（我在宿主侧直接读，无需用户复制）
@@ -1338,7 +1345,6 @@ function MobileBridgeSection(props) {
       const logText = (STATE.log && STATE.log.length)
         ? STATE.log.join('\n')
         : '（本次未产生收发日志：说明失败发生在创建传输层之前）';
-      setOut(logText);
       try {
         // 方便用户直接粘贴给开发者：失败即把完整日志放进剪贴板
         await navigator.clipboard.writeText(logText);
@@ -1369,7 +1375,7 @@ function MobileBridgeSection(props) {
       const raw = String(e && e.message ? e.message : e);
       const hint = friendly(raw, t, kind);
       setError(hint ? (hint + '\n\n原始错误：' + raw) : '截图失败：' + raw);
-      setOut((STATE.log || []).slice(-30).join('\n') || raw);
+
     } finally {
       setBusy(false);
     }
@@ -1409,7 +1415,7 @@ function MobileBridgeSection(props) {
           try {
             await dumpUsbState('诊断按钮');
             const d = await diagnoseUsb();
-            setOut('USB 诊断：\n' + JSON.stringify(d, null, 2));
+            appendToLog('USB 诊断：\n' + JSON.stringify(d, null, 2));
           } catch (e) {
             setError(String(e && e.message ? e.message : e));
           }
@@ -1545,17 +1551,10 @@ function MobileBridgeSection(props) {
       h('button', { className: 'mb-btn', disabled: busy, onClick: screenshot }, t('screenshot')),
     ));
 
-    if (out) {
-      children.push(h('div', { key: 'oh', className: 'mb-row' },
-        h('button', { className: 'mb-btn', onClick: copyOut }, copied ? t('copied') : t('copy')),
-      ));
-      children.push(h('pre', { key: 'o', className: 'mb-out' }, out));
-    }
-
     // 设备日志：显示当前活跃设备的日志，默认「用户可读」，可勾选「完整日志」供开发者排查
     {
       const activeSess = STATE.sessions.find((x) => x.id === STATE.activeId);
-      const logArr = (activeSess && activeSess.log) || STATE.log || [];
+      const logArr = STATE.log || [];
       const shown = showFullLog ? logArr : logArr.filter(isReadableLogLine);
       const sessName = activeSess
         ? ((activeSess.info && (activeSess.info.model || activeSess.info.serial)) || '设备')

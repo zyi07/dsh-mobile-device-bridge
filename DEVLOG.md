@@ -1428,3 +1428,19 @@ F5 无效，**重启电脑才恢复**。任务管理器无 hdc/华为进程。
    设备信息卡统一显示「系统版本」。
 
 构建 r107。待用户查看 UI。
+
+## 2026-11-23 11:35 - 修鸿蒙机型/版本探测 + 输出并入设备日志（r108）
+
+**问题1：鸿蒙读不到机型/系统版本**（显示「HarmonyOS 设备 / HarmonyOS」）。
+根因：`connectHarmonyInner(t, device)` 没有 `token` 参数，但内部探测代码
+（probe/机型轮询）引用了 `token` → `ReferenceError` 被 try/catch 吞掉 →
+model/api 全探测失败，走 fallback。修复：`connectHarmony` 把 token 传入
+`connectHarmonyInner(t, dev, token)`。
+
+**问题2：不需要单独的输出区，统一用「设备日志」展示**。
+- 移除「复制输出 + 原始日志」输出块
+- 命令结果 / 截图提示 / 诊断结果 → 追加进当前设备日志（`appendToLog`），显示在设备日志卡片
+- 设备日志卡片改用 `STATE.log`（连接失败无 session 时也能看）
+- `STATE.notify` 改为触发刷新（实时日志写 STATE.log，由卡片/连接中实时区显示）
+
+构建 r108。
