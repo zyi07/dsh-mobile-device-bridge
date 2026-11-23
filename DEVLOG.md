@@ -1616,3 +1616,14 @@ exec/screenshot 全部报「浏览器没有报告已连接设备」；diag.lastL
 - 紧接着 POST /mbridge/agc/login/start → 14.4s 返回 **新二维码**（不再自动登录）
 
 **待做什么：** AGC 业务 API 401 仍未解决（见上一节）
+
+## 2026-11-23 18:26 - 真机快速联调（鸿蒙 PLA-AL10）
+
+**结果（全部经 /mbridge 接口实测）：** 设备识别 PLA-AL10 / HarmonyOS API 26 / DSHDEVICE0000001；
+exec 1.4s（bm get -u 返回 UDID）；截图 4.5s（1316×2832 JPEG 266KB）；push 58B 落 /data/local/tmp 后 ls+cat 校验一致；
+pull 0.7s/1.5s 内容一致；华为登录 state=success hasJwt=true cookieCount=18。
+
+**发现的问题：**
+- `diag.snapshotError: fs is not defined` —— poll 路由里用了未定义的 `fs.writeFileSync`，改成 `await import('node:fs/promises')`（已修，需重启宿主生效）
+- 刚连上设备的前 1~2 秒内，needBrowser() 守卫偶尔判"浏览器未报告设备"，重试即成功（瞬时抖动，未改）
+- push 接口的字段是 `{path(远端), base64(内容)}`，不是 `{local, remote}`；文档要写清

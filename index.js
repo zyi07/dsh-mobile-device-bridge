@@ -755,7 +755,8 @@ export function apply(ctx) {
       try {
         const snap = process.env.MOBILE_BRIDGE_POLL_SNAPSHOT
           || nodePath.join(process.env.HOME || '/root', '.dsh', 'mbridge-poll.json');
-        fs.writeFileSync(snap, JSON.stringify(payload), 'utf8');
+        const fsMod = await import('node:fs/promises');
+        await fsMod.writeFile(snap, JSON.stringify(payload), 'utf8');
         diag.snapshotError = null;
       } catch (e) {
         diag.snapshotError = String((e && e.message) || e);
