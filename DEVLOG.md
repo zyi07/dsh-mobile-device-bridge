@@ -1489,3 +1489,10 @@ sysVersion 改为 `HarmonyOS 7.0.0.111`；另把 api 探测的候选去掉 softw
 **打包验证：** `npm pack` → 11 个文件、142KB；解压后 `index.js` 语法 OK、`lib/cli-channel.js` 存在、import 正确。
 
 **包信息：** dsh-mobile-bridge@0.1.0，11 files，142.8kB。
+
+## 2026-11-23 12:05 - 用打包 tgz 正式安装到 profile（清理开发软链）
+
+- `remove_bundle dsh-mobile-bridge`（原 source 为 `link:/root/dsh-mobile-bridge` 开发软链）
+- `install_bundle target=/root/dsh-mobile-bridge/dsh-mobile-bridge-0.1.0.tgz`
+- 结果：profile node_modules 下为**真实目录副本**（非软链），lib/cli-channel.js 存在，
+  version 0.1.0，`/mbridge/status` 正常。开发目录与运行环境已解耦。
