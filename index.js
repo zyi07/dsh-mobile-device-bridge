@@ -37,6 +37,7 @@ export function apply(ctx) {
   let seq = 0;
   let lastSeen = 0;
   let device = null;
+  let devices = [];
   /** 自诊断：intercept 是否注册成功、match/handler 各被调多少次、看到过什么端点 */
   const diag = {
     connectionService: false,
@@ -173,6 +174,7 @@ export function apply(ctx) {
               browserAlive: browserAlive(),
               lastSeenMsAgo: lastSeen ? now() - lastSeen : null,
               device,
+              devices,
               queued: queue.length,
               inflight: jobs.size,
               diag,
@@ -187,7 +189,7 @@ export function apply(ctx) {
                 + '后台标签页会被 Chrome 节流/冻结，这是浏览器行为，不是插件故障。',
               );
             }
-            if (!device) {
+            if (!device && devices.length === 0) {
               throw new Error('浏览器没有报告已连接设备，请先在设置页点「连接设备」');
             }
           };
@@ -200,6 +202,20 @@ export function apply(ctx) {
             const timeoutMs = Math.min(Math.max(Number(body.timeoutMs) || 60000, 1000), 300000);
             const r = await enqueue('shell', { cmd }, timeoutMs);
             send(res, 200, { ok: true, device, output: r.output });
+            return;
+          }
+
+          // ---- 多设备：切换活跃设备 ----
+          if (path === ROUTE_PREFIX + '/activate' && req.method === 'POST') {
+            const body = await readBody(req);
+            const id = String(body.id || '');
+            if (!id) { send(res, 400, { ok: false, error: '缺少 id' }); return; }
+            if (!browserAlive()) {
+              send(res, 503, { ok: false, error: '浏览器没有在轮询，请把 DSH 标签页切到前台' });
+              return;
+            }
+            const r = await enqueue('activate', { id }, 15000);
+            send(res, 200, { ok: r.ok !== false, activeId: r.activeId || id, output: r.output, error: r.error });
             return;
           }
 
@@ -475,6 +491,7 @@ export function apply(ctx) {
       diag.lastMethod = method;
       lastSeen = now();
       device = payload.device || null;
+      devices = Array.isArray(payload.devices) ? payload.devices : (device ? [device] : []);
       // 把最近一次 poll 的 payload 落盘：可以据此判断浏览器跑的客户端版本
       // （旧客户端只发 device，新客户端还会带 log 数组）
       try {

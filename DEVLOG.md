@@ -1304,3 +1304,30 @@ lastUpdateTime: 2023-04-18 → 2026-11-23 10:03:19
 
 三项补齐（push/pull、install/uninstall、断线自愈）中前两项已真机验证；
 断线自愈代码就绪但未做物理拔插验证。下一步：多设备。
+
+## 2026-11-23 10:20 - 多设备支持（r100）：安卓 + 鸿蒙可同时连接
+
+**需求强调：** 多设备不能只考虑同系统，安卓 + 鸿蒙同时连接也要支持。
+
+**架构（最小侵入）：**
+- `STATE.sessions[]` 保存所有已连接设备 `{ id, kind, adb, hdc, device, info }`
+- `STATE.activeId` 标记当前活跃设备；`STATE.adb/hdc/device/info/kind` 始终是**活跃设备的投影**，
+  因此所有既有任务代码（execShell/doTransferJob…）无需改动，任务自动发给活跃设备
+- `registerCurrentSession()` / `setActive(id)` / `removeSession(id)` / `syncActiveToSessions()`
+- `releaseStaleUsbHandles()` 跳过 sessions 中在用的设备（否则连第二台会把第一台关掉）
+- `runConnect()` 不再 detach 旧连接 → 多台并存
+- `disconnect()` 只断当前活跃设备，其它保留
+- 类型按钮不再因"已连接"禁用（可以随时连另一种系统的设备）
+
+**踩到的 bug：**
+1. `attach()` 从未设置 `STATE.kind='adb'`（安卓一直靠 STATE.adb 判断），
+   导致 `registerCurrentSession` 因 kind 为空直接跳过 → 设备列表永远空。已补 `STATE.kind='adb'`
+2. `readInfo` 偶尔拿不到 model/serial → 加 `device.productName`/`device.serial` 兜底
+
+**宿主：** poll 上报 `devices[]`/`activeId`；`/status` 返回 `devices`；新增
+`POST /mbridge/activate {id}` 切换活跃设备（走 enqueue('activate') → 浏览器 setActive）。
+
+**UI：** 已连接设备列表，chip 点击切换（● 为当前）；「断开」按钮移到列表标题栏右侧
+（用户要求：放在 chip 旁边太割裂）。
+
+构建 r100。

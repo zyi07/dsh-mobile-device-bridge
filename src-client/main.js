@@ -8,7 +8,7 @@ import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChu
 import { pushFileAdb, pullFileAdb, installApkAdb, uninstallPackageAdb } from './adb/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r96';
+const BUILD_TAG = 'r100';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -73,7 +73,69 @@ const STATE = {
   agc: { state: 'idle', qr: '', message: '' },   // 华为账号登录状态
   agcView: null,   // 遥控浏览器截图 { image, width, height }
   connection: null,   // 宿主 RPC 连接（用于把 HDC 日志送到宿主落盘）
+  sessions: [],       // 多设备：每项 { id, kind, adb, hdc, device, info }
+  activeId: null,     // 当前活跃设备 id
 };
+
+/** 设备唯一键：类型 + 序列号 */
+function sessionKey(kind, info, device) {
+  const serial = (info && info.serial)
+    || (device && (device.serialNumber || device.serial)) || '';
+  return kind + ':' + (serial || 'unknown');
+}
+
+/** 把当前 STATE 的活跃会话回写到 sessions（保证引用最新） */
+function syncActiveToSessions() {
+  if (!STATE.activeId) { return; }
+  const s = STATE.sessions.find((x) => x.id === STATE.activeId);
+  if (s) {
+    s.kind = STATE.kind; s.adb = STATE.adb; s.hdc = STATE.hdc;
+    s.device = STATE.device; s.info = STATE.info;
+  }
+}
+
+/** 把当前 STATE 里的设备登记为会话（并设为活跃） */
+function registerCurrentSession() {
+  if (!STATE.kind || (!STATE.adb && !STATE.hdc)) { return; }
+  const id = sessionKey(STATE.kind, STATE.info, STATE.device);
+  STATE.sessions = STATE.sessions.filter((s) => s.id !== id);
+  STATE.sessions.push({
+    id, kind: STATE.kind, adb: STATE.adb, hdc: STATE.hdc,
+    device: STATE.device, info: STATE.info,
+  });
+  STATE.activeId = id;
+}
+
+/** 切换活跃设备（STATE.adb/hdc/... 变成该设备的投影） */
+function setActive(id) {
+  syncActiveToSessions();
+  const s = STATE.sessions.find((x) => x.id === id);
+  if (!s) { return false; }
+  STATE.activeId = s.id;
+  STATE.kind = s.kind; STATE.adb = s.adb; STATE.hdc = s.hdc;
+  STATE.device = s.device; STATE.info = s.info;
+  STATE.connectToken += 1;     // 让旧任务作废
+  return true;
+}
+
+/** 移除一个设备会话并释放其资源 */
+async function removeSession(id) {
+  const s = STATE.sessions.find((x) => x.id === id);
+  if (s) {
+    if (s.hdc) { try { s.hdc.abort('断开设备'); } catch { /* ignore */ } }
+    if (s.adb) { try { await s.adb.close(); } catch { /* ignore */ } }
+    if (s.hdc) { try { await s.hdc.close(); } catch { /* ignore */ } }
+  }
+  STATE.sessions = STATE.sessions.filter((x) => x.id !== id);
+  if (STATE.activeId === id) {
+    const next = STATE.sessions[STATE.sessions.length - 1];
+    if (next) { setActive(next.id); }
+    else {
+      STATE.activeId = null; STATE.kind = null; STATE.adb = null;
+      STATE.hdc = null; STATE.device = null; STATE.info = null;
+    }
+  }
+}
 
 /**
  * 串行化连接：同一时刻只允许一个连接流程在跑。
@@ -171,8 +233,15 @@ async function releaseStaleUsbHandles() {
   let n = 0;
   try {
     const list = await navigator.usb.getDevices();
+    // 跳过已连接（sessions 里）的设备，多设备时不能把它们关掉
+    const inUse = new Set();
+    for (const s of STATE.sessions) {
+      const sn = s.device && (s.device.serialNumber || s.device.serial);
+      if (sn) { inUse.add(sn); }
+    }
+    if (STATE.device) { inUse.add(STATE.device.serialNumber || STATE.device.serial); }
     for (const d of list) {
-      if (d.opened) {
+      if (d.opened && !inUse.has(d.serialNumber || d.serial)) {
         try {
           await d.close();
           n += 1;
@@ -466,10 +535,13 @@ async function attach(device) {
   const adb = new Adb(transport);
   pushAdbLog('ADB 认证完成');
   const info = await readInfo(adb, device);
+  if (!info.model) { info.model = device.productName || ''; }
+  if (!info.serial) { info.serial = device.serialNumber || device.serial || ''; }
   pushAdbLog(`机型=${info.model || '?'} Android=${info.android || '?'}`);
   STATE.adb = adb;
   STATE.device = device;
   STATE.info = info;
+  STATE.kind = 'adb';        // 关键：registerCurrentSession 依赖 kind
   return info;
 }
 
@@ -823,6 +895,12 @@ async function runJob(job) {
       }
       return { ok: true, base64: toBase64(shot.bytes), mime: shot.mime };
     }
+    if (job.kind === 'activate') {
+      const id = String(job.data && job.data.id || '');
+      const ok = setActive(id);
+      if (!ok) { return { ok: false, error: '没有这个设备：' + id }; }
+      return { ok: true, output: '已切换到 ' + id, activeId: id };
+    }
     if (job.kind === 'push' || job.kind === 'pull' || job.kind === 'install' || job.kind === 'uninstall') {
       const r = await doTransferJob(job);
       if (stale() && r.ok) { return { ok: false, error: '连接已切换，任务作废' }; }
@@ -891,8 +969,15 @@ function startBridge(connection) {
       try {
         const res = await connection.rpc.call(BRIDGE, EP + '/poll', {
           device: STATE.info
-            ? { model: STATE.info.model, android: STATE.info.android, serial: STATE.info.serial }
+            ? { model: STATE.info.model, android: STATE.info.android, os: STATE.info.os, kind: STATE.kind, serial: STATE.info.serial }
             : null,
+          devices: (STATE.sessions || []).map((x) => ({
+            id: x.id, kind: x.kind,
+            model: x.info && x.info.model || '',
+            serial: x.info && x.info.serial || '',
+            active: x.id === STATE.activeId,
+          })),
+          activeId: STATE.activeId,
           build: BUILD_TAG,
           log: STATE.log && STATE.log.length ? STATE.log.slice(-80) : undefined,
         });
@@ -1116,27 +1201,27 @@ function MobileBridgeSection(props) {
   }
 
   async function runConnect(device) {
-    // 作废上一次会话：避免它的重试循环继续往端点写旧 sid 的帧
+    // 多设备：先把当前活跃设备存进 sessions（不清空、不断开），再连接新设备
+    syncActiveToSessions();
     const token = ++STATE.connectToken;
-    if (STATE.hdc) { try { STATE.hdc.abort('用户发起新连接'); } catch { /* ignore */ } STATE.hdc = null; }
     STATE.info = null;
     try {
       if (kind === 'hdc') {
-        if (STATE.adb || STATE.hdc) { await detach(); }
-        // 先清掉浏览器里残留的句柄，否则 open 会一直 Access denied
+        // 清掉浏览器里残留的句柄（releaseStaleUsbHandles 会跳过 sessions 里在用的设备）
         await releaseStaleUsbHandles();
         const next = await connectHarmony(device, token);
         await flushHdcLog();
         setInfo(next);
+        registerCurrentSession();
         setCmd('param get const.product.model');
         setPhase('connected');
         return;
       }
       if (STATE.connectToken !== token) { return; }        // 期间已发起新连接
-      if (STATE.adb || STATE.hdc) { await detach(); }
       const next = await attach(device);
-      if (STATE.connectToken !== token) { await detach(); return; }   // 连接被取代
+      if (STATE.connectToken !== token) { return; }   // 连接被取代
       setInfo(next);
+      registerCurrentSession();
       setCmd('getprop ro.product.model');
       setPhase('connected');
     } catch (e) {
@@ -1175,10 +1260,13 @@ function MobileBridgeSection(props) {
   }
 
   async function disconnect() {
-    await detach();
-    setInfo(null);
-    setOut('');
-    setPhase('idle');
+    if (STATE.activeId) {
+      await removeSession(STATE.activeId);   // 只断当前这台，其他设备保留
+    } else {
+      await detach();
+    }
+    setInfo(STATE.info || null);
+    if (!STATE.activeId) { setOut(''); setPhase('idle'); }
   }
 
   async function runShell() {
@@ -1272,13 +1360,13 @@ function MobileBridgeSection(props) {
       h('button', {
         key: 'kadb',
         className: 'mb-btn' + (view === 'device' && kind === 'adb' ? ' mb-btn--primary' : ''),
-        disabled: (view === 'device' && kind === 'adb') || !!STATE.adb || !!STATE.hdc,
+        disabled: phase === 'connecting',
         onClick: () => { setView('device'); setKind('adb'); },
       }, t('kindAdb')),
       h('button', {
         key: 'khdc',
         className: 'mb-btn' + (view === 'device' && kind === 'hdc' ? ' mb-btn--primary' : ''),
-        disabled: (view === 'device' && kind === 'hdc') || !!STATE.adb || !!STATE.hdc,
+        disabled: phase === 'connecting',
         onClick: () => { setView('device'); setKind('hdc'); },
       }, t('kindHdc')),
       h('button', {
@@ -1320,6 +1408,40 @@ function MobileBridgeSection(props) {
     for (const el of buildHuaweiAccountPanel(t)) { children.push(el); }
     children.push(h('div', { key: 'n2', className: 'mb-note' }, t('accountHintShort')));
     return h('div', { className: 'mb-root' }, children);
+  }
+
+  // 多设备：已连接设备列表（点 chip 切换活跃设备，● 为当前；断开在标题栏）
+  if (STATE.sessions && STATE.sessions.length > 0) {
+    const chips = STATE.sessions.map((sess) => {
+      const isActive = sess.id === STATE.activeId;
+      const model = (sess.info && sess.info.model) || (sess.device && sess.device.productName) || '';
+      const serial = (sess.info && sess.info.serial) || (sess.device && (sess.device.serialNumber || sess.device.serial)) || '';
+      const label = (model || serial || '设备') + (serial && model ? ' · ' + serial : '');
+      const typeTag = sess.kind === 'hdc' ? '鸿蒙' : '安卓';
+      return h('button', {
+        key: 'dev-' + sess.id,
+        className: 'mb-btn' + (isActive ? ' mb-btn--primary' : ''),
+        style: { marginRight: '8px', marginBottom: '6px' },
+        title: sess.id,
+        onClick: () => {
+          if (isActive) { return; }
+          setActive(sess.id);
+          setInfo(STATE.info || null);
+          setPhase('connected');
+          setError('');
+        },
+      }, (isActive ? '● ' : '') + typeTag + ' ' + label);
+    });
+    children.push(h('div', { key: 'devlist', className: 'mb-card' },
+      h('div', {
+        key: 'hdr',
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' },
+      },
+        h('div', { style: { fontWeight: 600 } }, t('devicesTitle') + '（' + STATE.sessions.length + '）'),
+        h('button', { className: 'mb-btn', style: { padding: '4px 12px' }, onClick: disconnect }, t('disconnect')),
+      ),
+      h('div', {}, chips),
+    ));
   }
 
   if (phase === 'reconnecting') {
@@ -1435,6 +1557,7 @@ export function apply(ctx) {
       hintAdb: '连接会跟着页面保留：关掉设置、切到别页再回来都不用重连；刷新页面则会断开，之后会自动尝试恢复。需要在手机上开启「USB 调试」，首次连接时手机会弹出授权提示。同一时刻只能有一个程序占用 USB，请先停掉本机的 adb server、Android Studio、scrcpy 等。',
       hintHdc: '连接会跟着页面保留：关掉设置、切到别页再回来都不用重连；刷新页面则会断开。需要在手机上开启「USB 调试」，并且本机不能有 hdc / DevEco Studio 正在占用设备（连接前先执行 hdc kill）。首次连接需要在手机上点「允许 / 始终信任」；之后同一把密钥不会再询问。连接建立后才可用命令与截图。',
       navAccount: '华为账号',
+      devicesTitle: '已连接设备',
       accountTitle: '华为账号登录',
       accountHintShort: '登录态保存在本机，插件重载、切页、重连手机都不需要重新登录。',
       accountHint: '用手机「控制中心 → 扫一扫」扫码登录华为开发者账号。登录后本插件可以自动为你申请调试证书、生成调试 Profile 并给 HAP 签名——整个过程不需要你手动准备任何签名材料。',
@@ -1505,6 +1628,7 @@ export function apply(ctx) {
       hintAdb: 'The connection survives closing settings or switching pages; reloading the page drops it and it will try to reconnect. Enable USB debugging on the phone and confirm the authorization prompt on first connect. Only one program may hold the USB device, so stop the adb server, Android Studio and scrcpy first.',
       hintHdc: 'The connection survives closing settings or switching pages; reloading drops it. Enable USB debugging on the phone and make sure no hdc / DevEco Studio is holding the device (run hdc kill first). On first connect tap Allow / Always trust on the phone; the saved key is not asked for again. Commands and screenshots work once connected.',
       navAccount: 'Huawei account',
+      devicesTitle: 'Connected devices',
       accountTitle: 'Huawei account sign-in',
       accountHintShort: 'The session is stored on this machine; reloading, switching pages or reconnecting the phone needs no new sign-in.',
       accountHint: 'Scan the QR with your phone (Control Center > Scan) to sign in. Once signed in, the plugin requests a debug certificate, mints a debug profile and signs HAPs for you - no signing material needed on your side.',
