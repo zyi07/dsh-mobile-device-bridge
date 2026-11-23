@@ -766,8 +766,10 @@ class LoginSession:
         if self.state in ("success", "failed", "need_code", "need_captcha"):
             return
         if not self.page:
-            self.state = "failed"
-            self.message = "会话未启动"
+            # 没有浏览器会话 ≠ 出错：面板刚打开时就是这种状态，别显示成「失败」
+            if self.state not in ("success",):
+                self.state = "idle"
+                self.message = ""
             return
         # ★ 扫码成功的唯一可靠信号：本地回调收到 tempToken
         if self.temp_token:
@@ -895,8 +897,17 @@ async def main():
                 await sess.poll()
                 _emit(sess.snapshot(with_qr=True))
             elif cmd == "close":
+                # 「清除登录态」= 关浏览器 + 删掉落盘的凭证，
+                # 否则下次 start() 会拿 storage_state 直接回到「已登录」
                 await sess.close()
-                _emit({"ok": True})
+                removed = False
+                try:
+                    if os.path.exists(COOKIE_FILE):
+                        os.unlink(COOKIE_FILE)
+                        removed = True
+                except Exception:
+                    pass
+                _emit({"ok": True, "removed": removed})
                 break
             else:
                 _emit({"ok": False, "error": f"未知命令 {cmd}"})

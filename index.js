@@ -648,7 +648,15 @@ export function apply(ctx) {
             } catch { /* 进程可能已退出 */ }
             if (agcLoginProc) { try { agcLoginProc.stdin.end(); } catch { /* ignore */ } }
             agcLoginProc = null;
-            send(res, 200, { ok: true });
+            // 关键：光关浏览器不算退出登录 —— 登录态在 agc-session.json 里，
+            // 不删掉它下次 start() 会拿 storage_state 直接回到「已登录」。
+            let removed = false;
+            try {
+              const fs = await import('node:fs/promises');
+              await fs.unlink(agcSessionFile());
+              removed = true;
+            } catch { /* 本来就不存在 */ }
+            send(res, 200, { ok: true, removed });
             return;
           }
           if (path === ROUTE_PREFIX + '/agc/session' && req.method === 'GET') {

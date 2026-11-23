@@ -1599,3 +1599,20 @@ exec/screenshot 全部报「浏览器没有报告已连接设备」；diag.lastL
 **待做什么：**
 - AGC 业务 API（`connect-api.cloud.huawei.com` 的 user-team-list / device/add / cert/add / provision/add）用 JWT 调用全部 401，header 组合试过 oauth2Token/uid/teamId/Bearer/accessToken 均不通 —— 需要抓 DevEco 或 AGC 控制台的真实请求再定协议，不能靠猜
 - 自动签名链路（设备注册→证书→Profile→hap-sign-tool 签名）尚未打通
+
+## 2026-11-23 18:20 - 修「退出登录退不出来 / 重新登录自动变成已登录」
+
+**问题：** 面板点「清除登录态」只关了 Playwright 浏览器，没删 `/root/.dsh/agc-session.json`；
+下次登录 start() 拿 storage_state 复用 cookie → 直接回到已登录（授权确认页）。
+
+**改动：**
+- `tools/agc_login.py`：`close` 命令同时 `os.unlink(COOKIE_FILE)`，回 `{ok, removed}`
+- `index.js`：`/agc/login/close` 路由也补了删文件（下次重启宿主后生效）
+- `tools/agc_login.py` `poll()`：无浏览器会话时返回 `idle` 而不是 `failed`（面板刚打开不该红）
+- 面板按钮文案：`清除登录态` → `退出登录（清除本机凭证）`
+
+**验证：**
+- POST /mbridge/agc/login/close → 文件消失；status 立即变 `idle`
+- 紧接着 POST /mbridge/agc/login/start → 14.4s 返回 **新二维码**（不再自动登录）
+
+**待做什么：** AGC 业务 API 401 仍未解决（见上一节）

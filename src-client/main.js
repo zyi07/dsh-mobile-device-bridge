@@ -485,9 +485,18 @@ async function agcCheckSession() {
 
 async function agcClearSession() {
   try {
-    await fetch(AGC_API + '/login/close', { method: 'POST' });
-  } catch { /* ignore */ }
-  STATE.agc = { state: 'idle', qr: '', message: '已退出登录' };
+    const r = await fetch(AGC_API + '/login/close', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    STATE.agc = {
+      state: 'idle', qr: '', mode: 'qr',
+      message: d && d.removed
+        ? '已清除登录态（本机凭证已删除），下次登录需要重新扫码'
+        : '已关闭登录会话（本机没有凭证文件）',
+    };
+  } catch (e) {
+    STATE.agc = { state: 'failed', qr: '', message: '清除失败：' + String(e && e.message ? e.message : e) };
+    return;
+  }
   agcPollTimer && clearInterval(agcPollTimer);
   agcPollTimer = null;
 }
@@ -1747,7 +1756,7 @@ export function apply(ctx) {
       agcHint: '用手机「控制中心 → 扫一扫」扫码登录华为开发者账号，登录态只保存在本机、不上传。自动申请调试证书与 Profile 的功能仍在开发中，当前版本还不能替你签名任意应用。',
       agcLogin: '开始登录（显示二维码）',
       agcRefresh: '刷新二维码',
-      agcLogout: '清除登录态',
+      agcLogout: '退出登录（清除本机凭证）',
       agcWaiting: '等待扫码…二维码约 2 分钟有效',
       agcSuccess: '已登录，登录态已保存',
       agcFailed: '登录失败',
@@ -1828,7 +1837,7 @@ export function apply(ctx) {
       agcHint: 'Scan the QR with your phone (Control Center > Scan) to sign in. The session stays on this machine and is used to request a debug certificate and profile; you do not need to supply a pre-signed HAP.',
       agcLogin: 'Start sign-in (show QR)',
       agcRefresh: 'Refresh QR',
-      agcLogout: 'Clear session',
+      agcLogout: 'Log out (clear local credential)',
       agcWaiting: 'Waiting for the scan - the QR expires after about two minutes',
       agcSuccess: 'Signed in, session saved',
       agcFailed: 'Sign-in failed',
