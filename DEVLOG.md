@@ -1627,3 +1627,27 @@ pull 0.7s/1.5s 内容一致；华为登录 state=success hasJwt=true cookieCount
 - `diag.snapshotError: fs is not defined` —— poll 路由里用了未定义的 `fs.writeFileSync`，改成 `await import('node:fs/promises')`（已修，需重启宿主生效）
 - 刚连上设备的前 1~2 秒内，needBrowser() 守卫偶尔判"浏览器未报告设备"，重试即成功（瞬时抖动，未改）
 - push 接口的字段是 `{path(远端), base64(内容)}`，不是 `{local, remote}`；文档要写清
+
+## 2026-11-23 18:36 - 真正的自动签名打通（复刻 deveco-cli，产出并校验通过）
+
+**协议来源（不是猜的）：** 从 npm 拉了官方实现 `@deveco/deveco-cli-common@1.3.4` 的 `dist/cli.js`，
+照抄端点、请求头与 body：`{uid, teamId, oauth2Token:<accessToken>, source:"cli", lang:"zh-CN"}`。
+关键修正：`oauth2Token` 不是 JWT，要先 `GET /authrouter/auth/api/jwToken/check`（headers `jwtToken`+`refresh`）换 accessToken。
+
+**新文件 `tools/agc_sign.py`（一条命令跑完整链）：**
+jwt → accessToken → team → device/list(start 从 1 起) → device/add → keypair/CSR →
+cert/add(certName=auto_debug_<team>_<p12哈希>.cer) → objects/url/reapply 下载 .cer →
+provision/add(deviceList 用云端 deviceId，不是 64 位 UDID) → 下载 .p7b → hap-sign-tool sign-app
+
+**踩过的坑（都已修）：**
+- `generate-csr` 要用 `-keystorePwd`，只给 `-keyPwd` 会报 keystore password incorrect
+- 口令必须落盘复用（debugKey.pwd），否则每次重生成 p12 与已有证书不配套 → `Certificates error`
+- 证书名必须绑当前密钥（用 p12 哈希后缀），复用账号里同名旧证书会签名失败
+- provisionName 要带 certId，否则 AGC 按名去重返回旧 profile（里面是别人的证书）
+- device/list `start` 必须 ≥1，返回在 `list` 字段
+- provision 的 `deviceList` 是云端 deviceId（19 位数字），UDID 是 64 位 hex，长度超 32 会报错
+
+**验证：** 对 `dsh_mini_unsigned.hap`(com.dsh.bridgeapp) 生成 `/tmp/mini_signed.hap` 650KB；
+`hap-sign-tool verify-app` → `Digest verify result: true` / `verify permission sign success` / `verify-app success`。
+p7b 内 bundle-name=com.dsh.bridgeapp、device-ids 含本机 UDID。
+**未验证：** 装到手机 —— 传输时浏览器 WebUSB 掉线（devAge 336s），install 报「浏览器没有报告已连接设备」。
