@@ -1413,3 +1413,18 @@ F5 无效，**重启电脑才恢复**。任务管理器无 hdc/华为进程。
 - 非活跃设备掉线不会自动重连（只重连当前活跃台）——已知边界。
 
 构建 r106。
+
+## 2026-11-23 11:25 - UI 改造（r107）
+
+按用户要求：
+1. **顶栏统一「连接设备」**：去掉 Android/HarmonyOS 类型按钮。点「连接设备」→ 用
+   `navigator.usb.requestDevice({filters:[{vendorId:0x12d1}]})` 选设备，
+   再用 `manager.getDevices()` 对照 serial **自动识别**：在 ADB 列表里=安卓，否则=鸿蒙。
+   `runConnect(device, connKind)` 参数化以接收识别结果。
+2. **每设备独立日志 + 可读/完整开关**：sessions[x].log 存各自日志，setActive 时切换 STATE.log；
+   底部新增「设备日志」卡片，默认过滤掉 RX/TX/DBG 协议帧（isReadableLogLine），
+   勾选「完整日志（开发者）」显示原始帧。
+3. **系统版本统一**：info.sysVersion（安卓 "Android 10"、鸿蒙 "HarmonyOS (API 26)"），
+   设备信息卡统一显示「系统版本」。
+
+构建 r107。待用户查看 UI。

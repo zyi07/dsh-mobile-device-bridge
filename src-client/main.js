@@ -8,7 +8,7 @@ import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChu
 import { pushFileAdb, pullFileAdb, installApkAdb, uninstallPackageAdb } from './adb/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r106';
+const BUILD_TAG = 'r107';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -34,6 +34,13 @@ const h = React.createElement;
  * 把 Tango / WebUSB 的英文异常翻译成可执行的下一步。
  * 认不出来的原样返回，便于贴到 Console 里排查。
  */
+// 日志行形如 "HH:MM:SS.mmm LEVEL msg"；RX/TX/DBG 是协议原始帧，默认不展示给普通用户
+export function isReadableLogLine(line) {
+  const m = String(line).match(/^\d\d:\d\d:\d\d\.\d+\s+([A-Z]+)\s/);
+  if (!m) { return true; }
+  return !['RX', 'TX', 'DBG'].includes(m[1]);
+}
+
 export function friendly(raw, t, kind = 'adb') {
   // 第 7 轮实测结论：hdc server 常驻时，连 open 都拿不到句柄。
   // open 失败 = 设备被别的程序独占，与驱动无关（interface 0 已确认是 WINUSB）。
@@ -90,7 +97,7 @@ function syncActiveToSessions() {
   const s = STATE.sessions.find((x) => x.id === STATE.activeId);
   if (s) {
     s.kind = STATE.kind; s.adb = STATE.adb; s.hdc = STATE.hdc;
-    s.device = STATE.device; s.info = STATE.info;
+    s.device = STATE.device; s.info = STATE.info; s.log = STATE.log;
   }
 }
 
@@ -107,7 +114,7 @@ function registerCurrentSession() {
   STATE.sessions = STATE.sessions.filter((s) => s.id !== id);
   STATE.sessions.push({
     id, kind: STATE.kind, adb: STATE.adb, hdc: STATE.hdc,
-    device: STATE.device, info: STATE.info,
+    device: STATE.device, info: STATE.info, log: STATE.log,
   });
   STATE.activeId = id;
 }
@@ -120,6 +127,7 @@ function setActive(id) {
   STATE.activeId = s.id;
   STATE.kind = s.kind; STATE.adb = s.adb; STATE.hdc = s.hdc;
   STATE.device = s.device; STATE.info = s.info;
+  STATE.log = s.log || [];     // 切到该设备的日志
   STATE.connectToken += 1;     // 让旧任务作废
   return true;
 }
@@ -548,6 +556,7 @@ async function attach(device) {
   const info = await readInfo(adb, device);
   if (!info.model) { info.model = device.productName || ''; }
   if (!info.serial) { info.serial = device.serialNumber || device.serial || ''; }
+  info.sysVersion = info.android ? ('Android ' + info.android) : 'Android';
   pushAdbLog(`机型=${info.model || '?'} Android=${info.android || '?'}`);
   STATE.adb = adb;
   STATE.device = device;
@@ -724,6 +733,7 @@ async function connectHarmonyInner(t, device) {
       || ((device.productName && !/HDC|Interface/i.test(device.productName)) ? device.productName : '')
       || 'HarmonyOS 设备',
     os: api ? `HarmonyOS (API ${api})` : 'HarmonyOS',
+    sysVersion: api ? `HarmonyOS (API ${api})` : 'HarmonyOS',
     devtype: online,
     auth: authText.split('\n').filter(Boolean).slice(-1)[0] || '',
   };
@@ -1136,6 +1146,7 @@ function MobileBridgeSection(props) {
   const [view, setView] = React.useState('device');   // device | account（与 Android/HarmonyOS 平级）
   const [phase, setPhase] = React.useState((STATE.adb || STATE.hdc) ? 'connected' : 'idle');
   const [kind, setKind] = React.useState(STATE.kind || 'adb');
+  const [showFullLog, setShowFullLog] = React.useState(false);
   const [error, setError] = React.useState('');
   const [info, setInfo] = React.useState(STATE.info);
   const [cmd, setCmd] = React.useState(
@@ -1183,37 +1194,39 @@ function MobileBridgeSection(props) {
   // ★★ 关键：requestDevice 必须在用户点击的同一个调用栈里**立刻**调用。
   //     绝不能先 await（包括等连接锁），否则浏览器判定"没有用户手势"，
   //     报 Must be handling a user gesture。这就是之前一直连不上的真正原因。
+  // 统一的「连接设备」：不预设安卓/鸿蒙，选完设备后自动识别类型。
   async function connect() {
     setError('');
-    let picked = null;
-    if (kind === 'hdc') {
-      if (typeof navigator === 'undefined' || !navigator.usb) { setError(t('noWebusb')); return; }
-      try {
-        picked = await navigator.usb.requestDevice({ filters: [{ vendorId: 0x12d1 }] });
-      } catch (e) {
-        if (!e || e.name !== 'NotFoundError') {
-          setError('选择设备失败：' + (e && e.message ? e.message : e));
-        }
-        return;
-      }
-    } else {
-      const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
-      if (!manager) { setError(t('noWebusb')); return; }
-      try {
-        picked = await manager.requestDevice();
-      } catch (e) {
+    if (typeof navigator === 'undefined' || !navigator.usb) { setError(t('noWebusb')); return; }
+    const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
+    let raw = null;
+    try {
+      // 华为设备的 ADB 与 HDC 都是 vendorId 0x12d1，用同一个选择器让用户直接选设备
+      raw = await navigator.usb.requestDevice({ filters: [{ vendorId: 0x12d1 }] });
+    } catch (e) {
+      if (!e || e.name !== 'NotFoundError') {
         setError('选择设备失败：' + (e && e.message ? e.message : e));
-        return;
       }
+      return;
     }
-    if (!picked) { setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle'); return; }
+    if (!raw) { setPhase((STATE.adb || STATE.hdc) ? 'connected' : 'idle'); return; }
 
+    // 自动识别：该设备出现在 ADB 设备列表里 → 安卓；否则 → 鸿蒙（HDC 接口不是 ADB 标准接口）
+    const serial = raw.serialNumber || raw.serial || '';
+    let adbDev = null;
+    if (manager) {
+      try {
+        const list = await manager.getDevices();
+        adbDev = list.find((d) => d.serial === serial) || null;
+      } catch { /* ignore */ }
+    }
+    const detected = adbDev ? 'adb' : 'hdc';
     setPhase('connecting');
     startKeepAlive();
-    return withConnectLock(() => runConnect(picked));
+    return withConnectLock(() => runConnect(detected === 'adb' ? adbDev : raw, detected));
   }
 
-  async function runConnect(device) {
+  async function runConnect(device, connKind) {
     // 多设备：先把当前活跃设备存进 sessions（不清空、不断开），再连接新设备
     syncActiveToSessions();
     // ★ 同一台设备（同 serial）重复连接时，必须先关闭旧会话释放它的 WebUSB claim，
@@ -1232,7 +1245,7 @@ function MobileBridgeSection(props) {
     const token = ++STATE.connectToken;
     STATE.info = null;
     try {
-      if (kind === 'hdc') {
+      if (connKind === 'hdc') {
         // 清掉浏览器里残留的句柄（releaseStaleUsbHandles 会跳过 sessions 里在用的设备）
         await releaseStaleUsbHandles();
         const next = await connectHarmony(device, token);
@@ -1255,7 +1268,7 @@ function MobileBridgeSection(props) {
       // 失败时把 USB 真实状态写进日志（我在宿主侧直接读，无需用户复制）
       let usbState = null;
       try { usbState = await dumpUsbState('连接失败后'); } catch { /* ignore */ }
-      let hint = friendly(raw, t, kind);
+      let hint = friendly(raw, t, connKind);
       // 精准诊断：设备在，但暴露的是 HID/其它接口，没有 HDC 的 0xff 接口
       if (usbState && usbState.count > 0 && usbState.hasHdcIface === false) {
         hint = '手机当前的 USB 接口不是 HDC 调试接口（现在暴露的是 class='
@@ -1382,19 +1395,6 @@ function MobileBridgeSection(props) {
   const children = [
     h('style', { key: 's' }, CSS),
     h('div', { key: 'row', className: 'mb-row' },
-      h('span', { key: 't0', className: 'mb-note' }, t('kindLabel')),
-      h('button', {
-        key: 'kadb',
-        className: 'mb-btn' + (view === 'device' && kind === 'adb' ? ' mb-btn--primary' : ''),
-        disabled: phase === 'connecting',
-        onClick: () => { setView('device'); setKind('adb'); },
-      }, t('kindAdb')),
-      h('button', {
-        key: 'khdc',
-        className: 'mb-btn' + (view === 'device' && kind === 'hdc' ? ' mb-btn--primary' : ''),
-        disabled: phase === 'connecting',
-        onClick: () => { setView('device'); setKind('hdc'); },
-      }, t('kindHdc')),
       h('button', {
         key: 'kacc',
         className: 'mb-btn' + (view === 'account' ? ' mb-btn--primary' : ''),
@@ -1502,8 +1502,8 @@ function MobileBridgeSection(props) {
       h('div', { className: 'mb-kv' },
         h('span', { className: 'mb-k' }, t('model')),
         h('span', { className: 'mb-v' }, info.model || '—'),
-        h('span', { className: 'mb-k' }, info.kind === 'hdc' ? t('os') : t('android')),
-        h('span', { className: 'mb-v' }, info.os || info.android || '—'),
+        h('span', { className: 'mb-k' }, t('sysVersion')),
+        h('span', { className: 'mb-v' }, info.sysVersion || info.os || info.android || '—'),
         h('span', { className: 'mb-k' }, t('serial')),
         h('span', { className: 'mb-v' }, info.serial || '—'),
         h('span', { className: 'mb-k' }, t('usbId')),
@@ -1551,6 +1551,34 @@ function MobileBridgeSection(props) {
       ));
       children.push(h('pre', { key: 'o', className: 'mb-out' }, out));
     }
+
+    // 设备日志：显示当前活跃设备的日志，默认「用户可读」，可勾选「完整日志」供开发者排查
+    {
+      const activeSess = STATE.sessions.find((x) => x.id === STATE.activeId);
+      const logArr = (activeSess && activeSess.log) || STATE.log || [];
+      const shown = showFullLog ? logArr : logArr.filter(isReadableLogLine);
+      const sessName = activeSess
+        ? ((activeSess.info && (activeSess.info.model || activeSess.info.serial)) || '设备')
+        : '—';
+      children.push(h('div', { key: 'devlog', className: 'mb-card', style: { marginTop: '10px' } },
+        h('div', {
+          key: 'h',
+          style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' },
+        },
+          h('div', { style: { fontWeight: 600 } }, t('deviceLog') + '（' + sessName + '）'),
+          h('label', { style: { fontSize: '12px', cursor: 'pointer', userSelect: 'none' } },
+            h('input', {
+              type: 'checkbox', checked: showFullLog,
+              onChange: (e) => setShowFullLog(e.target.checked),
+              style: { marginRight: '5px', verticalAlign: 'middle' },
+            }),
+            t('fullLog'),
+          ),
+        ),
+        h('pre', { className: 'mb-out', style: { maxHeight: '240px' } },
+          shown.length ? shown.join('\n') : t('noLog')),
+      ));
+    }
   }
 
   const diagText =
@@ -1561,7 +1589,7 @@ function MobileBridgeSection(props) {
     (DIAG.error ? ' · 错误: ' + DIAG.error : '');
   children.push(h('div', { key: 'diag', className: 'mb-note', style: { fontSize: '11.5px' } }, diagText));
 
-  children.push(h('div', { key: 'n', className: 'mb-note' }, t(kind === 'hdc' ? 'hintHdc' : 'hintAdb')));
+  children.push(h('div', { key: 'n', className: 'mb-note' }, t(STATE.kind === 'hdc' ? 'hintHdc' : 'hintAdb')));
 
   return h('div', { className: 'mb-root' }, children);
 }
@@ -1584,6 +1612,10 @@ export function apply(ctx) {
       hintHdc: '连接会跟着页面保留：关掉设置、切到别页再回来都不用重连；刷新页面则会断开。需要在手机上开启「USB 调试」，并且本机不能有 hdc / DevEco Studio 正在占用设备（连接前先执行 hdc kill）。首次连接需要在手机上点「允许 / 始终信任」；之后同一把密钥不会再询问。连接建立后才可用命令与截图。',
       navAccount: '华为账号',
       devicesTitle: '已连接设备',
+      sysVersion: '系统版本',
+      deviceLog: '设备日志',
+      fullLog: '完整日志（开发者）',
+      noLog: '（暂无日志）',
       accountTitle: '华为账号登录',
       accountHintShort: '登录态保存在本机，插件重载、切页、重连手机都不需要重新登录。',
       accountHint: '用手机「控制中心 → 扫一扫」扫码登录华为开发者账号。登录后本插件可以自动为你申请调试证书、生成调试 Profile 并给 HAP 签名——整个过程不需要你手动准备任何签名材料。',
@@ -1655,6 +1687,10 @@ export function apply(ctx) {
       hintHdc: 'The connection survives closing settings or switching pages; reloading drops it. Enable USB debugging on the phone and make sure no hdc / DevEco Studio is holding the device (run hdc kill first). On first connect tap Allow / Always trust on the phone; the saved key is not asked for again. Commands and screenshots work once connected.',
       navAccount: 'Huawei account',
       devicesTitle: 'Connected devices',
+      sysVersion: 'OS version',
+      deviceLog: 'Device log',
+      fullLog: 'Full log (developer)',
+      noLog: '(no log yet)',
       accountTitle: 'Huawei account sign-in',
       accountHintShort: 'The session is stored on this machine; reloading, switching pages or reconnecting the phone needs no new sign-in.',
       accountHint: 'Scan the QR with your phone (Control Center > Scan) to sign in. Once signed in, the plugin requests a debug certificate, mints a debug profile and signs HAPs for you - no signing material needed on your side.',
