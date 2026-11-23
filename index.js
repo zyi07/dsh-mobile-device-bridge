@@ -492,6 +492,7 @@ export function apply(ctx) {
       lastSeen = now();
       device = payload.device || null;
       devices = Array.isArray(payload.devices) ? payload.devices : (device ? [device] : []);
+      diag.lastLog = Array.isArray(payload.log) ? payload.log.slice(-30) : null;
       // 把最近一次 poll 的 payload 落盘：可以据此判断浏览器跑的客户端版本
       // （旧客户端只发 device，新客户端还会带 log 数组）
       try {
