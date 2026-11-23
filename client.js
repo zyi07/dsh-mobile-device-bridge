@@ -707,7 +707,7 @@ const string = ( /* #__NO_SIDE_EFFECTS__ */(lengthOrField) => {
 });
 
 const { AbortController } = globalThis;
-const ReadableStream = /* #__PURE__ */ (() => {
+const ReadableStream$1 = /* #__PURE__ */ (() => {
     const { ReadableStream } = globalThis;
     if (!ReadableStream.from) {
         ReadableStream.from = function (iterable) {
@@ -809,7 +809,7 @@ class TaskQueue {
     }
 }
 
-class PushReadableStream extends ReadableStream {
+class PushReadableStream extends ReadableStream$1 {
     /**
      * Create a new `PushReadableStream` from a source.
      *
@@ -1234,7 +1234,7 @@ class BufferedTransformStream {
         const buffered = new BufferedReadableStream(new PushReadableStream((controller) => {
             bufferedStreamController = controller;
         }));
-        this.#readable = new ReadableStream({
+        this.#readable = new ReadableStream$1({
             async pull(controller) {
                 try {
                     const value = await transform(buffered);
@@ -1311,7 +1311,7 @@ class ConcatStringStream {
         return this.#writable;
     }
     #readableController;
-    #readable = new ReadableStream({
+    #readable = new ReadableStream$1({
         start: (controller) => {
             this.#readableController = controller;
         },
@@ -1380,7 +1380,7 @@ class ConcatBufferStream {
         return this.#writable;
     }
     #readableController;
-    #readable = new ReadableStream({
+    #readable = new ReadableStream$1({
         start: (controller) => {
             this.#readableController = controller;
         },
@@ -1403,7 +1403,7 @@ class ConcatBufferStream {
     }
 }
 
-class ConsumableReadableStream extends ReadableStream {
+class ConsumableReadableStream extends ReadableStream$1 {
     static async enqueue(controller, chunk) {
         const output = new Consumable(chunk);
         controller.enqueue(output);
@@ -1448,7 +1448,7 @@ class ConsumableReadableStream extends ReadableStream {
     }
 }
 
-class ConsumableWrapByteReadableStream extends ReadableStream {
+class ConsumableWrapByteReadableStream extends ReadableStream$1 {
     constructor(stream, chunkSize, min) {
         const reader = stream.getReader({ mode: "byob" });
         let array = new Uint8Array(chunkSize);
@@ -1736,7 +1736,7 @@ function getWrappedReadableStream(wrapper, controller) {
  * 2. Synchronously create a `ReadableStream` by asynchronously return another `ReadableStream`.
  * 3. Convert native `ReadableStream`s to polyfilled ones so they can `pipe` between.
  */
-class WrapReadableStream extends ReadableStream {
+class WrapReadableStream extends ReadableStream$1 {
     readable;
     #reader;
     constructor(wrapper, strategy) {
@@ -3310,7 +3310,7 @@ async function* adbSyncPullGenerator(socket, path) {
     }
 }
 function adbSyncPull(socket, path) {
-    return ReadableStream.from(adbSyncPullGenerator(socket, path));
+    return ReadableStream$1.from(adbSyncPullGenerator(socket, path));
 }
 
 const ADB_SYNC_MAX_PACKET_SIZE = 64 * 1024;
@@ -5045,7 +5045,7 @@ class AdbDaemonWebUsbConnection {
             }
         }
         usbManager.addEventListener("disconnect", handleUsbDisconnect);
-        this.#readable = duplex.wrapReadable(new ReadableStream({
+        this.#readable = duplex.wrapReadable(new ReadableStream$1({
             pull: async (controller) => {
                 const packet = await this.#transferIn();
                 if (packet) {
@@ -6859,7 +6859,7 @@ async function verifyRemote(session, remotePath, localBytes) {
 }
 
 /** 把远端路径做 shell 转义（单引号包裹） */
-function shellQuote(p) {
+function shellQuote$1(p) {
   return `'${String(p).replace(/'/g, `'\\''`)}'`;
 }
 
@@ -6871,7 +6871,7 @@ function shellQuote(p) {
  */
 async function writeChunkAt(session, remotePath, chunkBytes, chunkSize, index, opts = {}) {
   const { log } = opts;
-  const path = shellQuote(remotePath);
+  const path = shellQuote$1(remotePath);
   const b64 = bytesToBase64(chunkBytes);
   const cmd = `echo -n '${b64}' | base64 -d | dd of=${path} bs=${chunkSize} seek=${index} conv=notrunc status=none`;
   if (cmd.length > 120 * 1024) {
@@ -6893,7 +6893,7 @@ async function writeChunkAt(session, remotePath, chunkBytes, chunkSize, index, o
 async function pushFile(session, remotePath, bytes, opts = {}) {
   const { onProgress, log } = opts;
   const total = bytes.length;
-  const path = shellQuote(remotePath);
+  const path = shellQuote$1(remotePath);
 
   // 先删旧文件，避免追加到上次残留内容后面
   await session.shell(`rm -f ${path}`, { timeoutMs: 15000, attempts: 1 });
@@ -6941,7 +6941,7 @@ async function pushFile(session, remotePath, bytes, opts = {}) {
  */
 async function pullFile(session, remotePath, opts = {}) {
   const { onProgress, log } = opts;
-  const path = shellQuote(remotePath);
+  const path = shellQuote$1(remotePath);
 
   // 先确认文件存在与大小，避免大文件误拉
   const ls = await session.shell(`ls -l ${path}`, { timeoutMs: 15000, attempts: 1 });
@@ -6982,7 +6982,7 @@ async function pullFile(session, remotePath, opts = {}) {
 
 /** 取远端文件 sha256（用于校验） */
 async function sha256Remote(session, remotePath) {
-  const r = await session.shell(`sha256sum ${shellQuote(remotePath)}`, { timeoutMs: 30000, attempts: 2 });
+  const r = await session.shell(`sha256sum ${shellQuote$1(remotePath)}`, { timeoutMs: 30000, attempts: 2 });
   return parseSha256(r.text);
 }
 
@@ -7007,12 +7007,12 @@ async function installHap(session, { bytes, filename, replace = false }, opts = 
   if (log) { log(`安装包校验通过 sha256=${check.local.slice(0, 16)}…`); }
   if (log) { log('执行 bm install -p <包路径>'); }
   const args = replace ? `--replace` : '';
-  const r = await session.shell(`bm install -p ${shellQuote(remote)} ${args}`.trim(),
+  const r = await session.shell(`bm install -p ${shellQuote$1(remote)} ${args}`.trim(),
     { timeoutMs: 240000, attempts: 1 });
   const out = String(r.text || '');
 
   // 清理临时包（保留在失败时便于排查？这里始终清理，避免占空间）
-  session.shell(`rm -f ${shellQuote(remote)}`, { timeoutMs: 20000, attempts: 1 }).catch(() => {});
+  session.shell(`rm -f ${shellQuote$1(remote)}`, { timeoutMs: 20000, attempts: 1 }).catch(() => {});
 
   const errMap = {
     '9568322': '签名不匹配：请确认 HAP 用调试证书签名，且调试 Profile 包含本机 UDID',
@@ -7035,12 +7035,141 @@ async function installHap(session, { bytes, filename, replace = false }, opts = 
 
 /** 卸载 */
 async function uninstallBundle(session, bundleName) {
-  const r = await session.shell(`bm uninstall -n ${shellQuote(bundleName)}`, { timeoutMs: 60000, attempts: 1 });
+  const r = await session.shell(`bm uninstall -n ${shellQuote$1(bundleName)}`, { timeoutMs: 60000, attempts: 1 });
   return String(r.text || '').trim();
 }
 
+/**
+ * Android 侧文件传输与应用管理
+ *
+ * 依据 `@yume-chan/adb@2.6.4` 的真实类型定义实现：
+ *   const sync = await adb.sync();                 // AdbSync
+ *   await sync.write({ filename, file: ReadableStream<Uint8Array> });  // 推文件
+ *   const stream = sync.read(filename);            // 拉文件，返回 ReadableStream
+ *   await sync.dispose();                          // 必须释放，否则 socket 泄漏
+ *
+ * ADB sync 是二进制流式协议，速度远高于鸿蒙那边的 shell+base64，
+ * 但仍保留 sha256 校验（写失败不报错是 shell 系的通病）。
+ */
+
+function bytesToReadableStream(bytes) {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+}
+
+async function readableStreamToBytes(stream) {
+  const reader = stream.getReader();
+  const parts = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) { break; }
+    if (value) { parts.push(value); total += value.length; }
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { out.set(p, off); off += p.length; }
+  return out;
+}
+
+/** 用 shell 执行并返回 { stdout, stderr, exitCode } */
+async function runShell(adb, cmd) {
+  const sp = adb.subprocess.shellProtocol;
+  if (sp) {
+    const r = await sp.spawnWaitText(cmd);
+    return { stdout: r.stdout || '', stderr: r.stderr || '', exitCode: r.exitCode };
+  }
+  const text = await adb.subprocess.noneProtocol.spawnWaitText(cmd);
+  return { stdout: text || '', stderr: '', exitCode: 0 };
+}
+
+function shellQuote(p) {
+  return `'${String(p).replace(/'/g, `'\\''`)}'`;
+}
+
+/** 推文件到设备 */
+async function pushFileAdb(adb, remotePath, bytes, opts = {}) {
+  const { log } = opts;
+  const dir = String(remotePath).replace(/\/[^/]*$/, '');
+  const sync = await adb.sync();
+  try {
+    if (dir) {
+      // 目录不存在时 sync.write 会失败，先建目录
+      await adb.subprocess.noneProtocol.spawnWaitText(`mkdir -p ${shellQuote(dir)}`);
+    }
+    await sync.write({ filename: remotePath, file: bytesToReadableStream(bytes) });
+    if (log) { log(`已写入 ${bytes.length} 字节 → ${remotePath}`); }
+  } finally {
+    try { await sync.dispose(); } catch { /* ignore */ }
+  }
+  return { bytes: bytes.length };
+}
+
+/** 从设备读文件 */
+async function pullFileAdb(adb, remotePath, opts = {}) {
+  const { log } = opts;
+  const sync = await adb.sync();
+  try {
+    const stream = sync.read(remotePath);
+    const bytes = await readableStreamToBytes(stream);
+    if (log) { log(`已读取 ${bytes.length} 字节 ← ${remotePath}`); }
+    return { bytes };
+  } finally {
+    try { await sync.dispose(); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * 安装 APK：推到 /data/local/tmp 后 `pm install`。
+ * Android 的 APK 自带签名（调试签名由构建产生），本插件不做签名。
+ */
+async function installApkAdb(adb, { bytes, filename, replace = false }, opts = {}) {
+  const { log } = opts;
+  const safe = String(filename || 'app.apk').replace(/[^\w.\-]/g, '_');
+  const remote = `/data/local/tmp/${Date.now()}_${safe}`;
+  if (log) { log(`推送 APK（${bytes.length} 字节）→ ${remote}`); }
+  await pushFileAdb(adb, remote, bytes, opts);
+
+  const flag = replace ? '-r' : '';
+  if (log) { log(`执行 pm install ${flag} ${remote}`); }
+  const r = await runShell(adb, `pm install ${flag} ${shellQuote(remote)}`.replace(/\s+/g, ' '));
+  adb.subprocess.noneProtocol.spawnWaitText(`rm -f ${shellQuote(remote)}`).catch(() => {});
+  const out = `${r.stdout || ''}\n${r.stderr || ''}`.trim();
+
+  const errMap = {
+    INSTALL_FAILED_ALREADY_EXISTS: '已存在同包名应用，请用「覆盖安装」',
+    INSTALL_FAILED_UPDATE_INCOMPATIBLE: '已安装版本签名不同，需先卸载',
+    INSTALL_FAILED_VERSION_DOWNGRADE: '版本号低于已安装版本，不能降级安装',
+    INSTALL_FAILED_INSUFFICIENT_STORAGE: '设备空间不足',
+    INSTALL_PARSE_FAILED_NOT_APK: '不是有效的 APK',
+  };
+  for (const [code, hint] of Object.entries(errMap)) {
+    if (out.includes(code)) {
+      throw new Error(`安装失败 ${code} —— ${hint}。设备原文：${out.slice(0, 200)}`);
+    }
+  }
+  if (!/Success/i.test(out)) {
+    throw new Error(`安装未成功：${out.slice(0, 200) || '(无输出)'}`);
+  }
+  return { output: out, remote };
+}
+
+/** 卸载应用 */
+async function uninstallPackageAdb(adb, pkg) {
+  const r = await runShell(adb, `pm uninstall ${shellQuote(pkg)}`);
+  const out = `${r.stdout || ''}\n${r.stderr || ''}`.trim();
+  if (!/Success/i.test(out)) {
+    throw new Error(`卸载失败：${out.slice(0, 200) || '(无输出)'}`);
+  }
+  return out;
+}
+
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r91';
+const BUILD_TAG = 'r92';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -7218,6 +7347,34 @@ async function releaseStaleUsbHandles() {
  * USB 掉线自愈：WebUSB 的 transfer 抛错后句柄即失效，此时用 getDevices() 取已授权设备
  * 重新走一遍连接（密钥已保存，通常无需上机确认）。
  */
+/** Android 断线自愈：用 getDevices() 取已授权设备重新 attach（不需要用户手势） */
+async function tryReconnectAdb() {
+  const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
+  if (!manager) { return false; }
+  try {
+    const list = await manager.getDevices();
+    const want = STATE.info && STATE.info.serial;
+    const dev = (want && list.find((d) => d.serial === want)) || list[0];
+    if (!dev) { return false; }
+    pushHdcLog('ADB', 'USB 句柄失效，尝试自动重连');
+    const next = await attach(dev);
+    STATE.kind = 'adb';
+    STATE.info = next;
+    pushHdcLog('ADB', '自动重连成功');
+    return true;
+  } catch (e) {
+    pushHdcLog('ADB', `自动重连失败：${(e && e.message) || e}`);
+    return false;
+  }
+}
+
+/** 按当前平台重连 */
+async function tryReconnectAny() {
+  if (STATE.kind === 'hdc') { return tryReconnectHdc(); }
+  if (STATE.kind === 'adb') { return tryReconnectAdb(); }
+  return false;
+}
+
 async function tryReconnectHdc() {
   if (typeof navigator === 'undefined' || !navigator.usb) { return false; }
   try {
@@ -7646,6 +7803,71 @@ const DIAG = { state: 'init', polls: 0, lastOk: 0, error: null, injected: null }
 const POLL_INTERVAL_MS = 1500;
 
 /** 执行一条宿主派下来的任务。 */
+/**
+ * 执行一个桥接任务。push/pull/install/uninstall 按当前平台分派到 HDC 或 ADB 实现。
+ */
+async function doTransferJob(job) {
+  const log = (m) => pushHdcLog('INFO', m);
+  const kind = job.kind;
+  const d = job.data;
+  const bytes = (d && d.base64) ? fromBase64(d.base64) : null;
+
+  if (kind === 'push') {
+    if (STATE.hdc) {
+      // 分片模式：只写这一块（幂等，精确偏移）
+      if (typeof d.index === 'number' && d.chunkSize) {
+        const r = await writeChunkAt(STATE.hdc, d.path, bytes, d.chunkSize, d.index, { log });
+        return { ok: true, bytes: r.bytes, chunk: d.index };
+      }
+      log(`开始上传 ${bytes.length} 字节 → ${d.path}`);
+      const r = await pushFile(STATE.hdc, d.path, bytes, { log });
+      return { ok: true, bytes: r.bytes, chunks: r.chunks };
+    }
+    if (STATE.adb) {
+      log(`开始上传 ${bytes.length} 字节 → ${d.path}`);
+      const r = await pushFileAdb(STATE.adb, d.path, bytes, { log });
+      return { ok: true, bytes: r.bytes };
+    }
+    return { ok: false, error: '未连接设备' };
+  }
+
+  if (kind === 'pull') {
+    if (STATE.hdc) {
+      log(`开始下载 ${d.path}`);
+      const r = await pullFile(STATE.hdc, d.path, { log });
+      return { ok: true, bytes: r.bytes.length, base64: toBase64(r.bytes) };
+    }
+    if (STATE.adb) {
+      log(`开始下载 ${d.path}`);
+      const r = await pullFileAdb(STATE.adb, d.path, { log });
+      return { ok: true, bytes: r.bytes.length, base64: toBase64(r.bytes) };
+    }
+    return { ok: false, error: '未连接设备' };
+  }
+
+  if (kind === 'install') {
+    if (STATE.hdc) {
+      log(`开始安装 ${d.filename}（${bytes.length} 字节）`);
+      const r = await installHap(STATE.hdc, { bytes, filename: d.filename, replace: !!d.replace }, { log });
+      return { ok: true, output: r.output };
+    }
+    if (STATE.adb) {
+      log(`开始安装 APK ${d.filename}（${bytes.length} 字节）`);
+      const r = await installApkAdb(STATE.adb, { bytes, filename: d.filename, replace: !!d.replace }, { log });
+      return { ok: true, output: r.output };
+    }
+    return { ok: false, error: '未连接设备' };
+  }
+
+  if (kind === 'uninstall') {
+    if (STATE.hdc) { return { ok: true, output: await uninstallBundle(STATE.hdc, d.bundle) }; }
+    if (STATE.adb) { return { ok: true, output: await uninstallPackageAdb(STATE.adb, d.bundle) }; }
+    return { ok: false, error: '未连接设备' };
+  }
+
+  return { ok: false, error: '未知任务类型 ' + kind };
+}
+
 async function runJob(job) {
   if (!STATE.adb && !STATE.hdc) { return { ok: false, error: '浏览器端尚未连接设备（请在设置页点「连接设备」）' }; }
   const token = STATE.connectToken;
@@ -7665,62 +7887,24 @@ async function runJob(job) {
       return { ok: true, base64: toBase64(shot.bytes), mime: shot.mime };
     }
     if (job.kind === 'push' || job.kind === 'pull' || job.kind === 'install' || job.kind === 'uninstall') {
-      if (STATE.kind !== 'hdc' || !STATE.hdc) {
-        return { ok: false, error: '文件传输/安装目前只支持 HarmonyOS 通道（Android 侧待接入 Tango sync）' };
-      }
-      const log = (m) => pushHdcLog('INFO', m);
-      if (job.kind === 'push') {
-        const bytes = fromBase64(job.data.base64);
-        // 分片模式：只写这一块（幂等，写到精确偏移）
-        if (typeof job.data.index === 'number' && job.data.chunkSize) {
-          const r = await writeChunkAt(STATE.hdc, job.data.path, bytes, job.data.chunkSize, job.data.index, { log });
-          return { ok: true, bytes: r.bytes, chunk: job.data.index };
-        }
-        log(`开始上传 ${bytes.length} 字节 → ${job.data.path}`);
-        const r = await pushFile(STATE.hdc, job.data.path, bytes, { log });
-        if (stale()) { return { ok: false, error: '连接已切换，任务作废' }; }
-        return { ok: true, bytes: r.bytes, chunks: r.chunks };
-      }
-      if (job.kind === 'pull') {
-        log(`开始下载 ${job.data.path}`);
-        const r = await pullFile(STATE.hdc, job.data.path, { log });
-        if (stale()) { return { ok: false, error: '连接已切换，任务作废' }; }
-        return { ok: true, bytes: r.bytes.length, base64: toBase64(r.bytes) };
-      }
-      if (job.kind === 'install') {
-        const bytes = fromBase64(job.data.base64);
-        log(`开始安装 ${job.data.filename}（${bytes.length} 字节）`);
-        const r = await installHap(STATE.hdc, {
-          bytes, filename: job.data.filename, replace: !!job.data.replace,
-        }, { log });
-        return { ok: true, output: r.output };
-      }
-      if (job.kind === 'uninstall') {
-        const out = await uninstallBundle(STATE.hdc, job.data.bundle);
-        return { ok: true, output: out };
-      }
+      const r = await doTransferJob(job);
+      if (stale() && r.ok) { return { ok: false, error: '连接已切换，任务作废' }; }
+      return r;
     }
     return { ok: false, error: '未知任务类型 ' + job.kind };
   } catch (e) {
     const msg = String(e && e.message ? e.message : e);
-    // USB 掉线：句柄已失效，尝试自动重连后重试一次同一个任务
-    if (/transferIn|transferOut|USBDevice|disconnect|lost|No device/i.test(msg)
-        && STATE.kind === 'hdc' && !stale()) {
-      const ok = await tryReconnectHdc();
+    // USB 掉线：按平台自动重连，然后重试同一任务一次
+    if (/transferIn|transferOut|USBDevice|disconnect|lost|No device|socket|closed/i.test(msg) && !stale()) {
+      const ok = await tryReconnectAny();
       if (ok) {
         try {
-          if (job.kind === 'shell') {
-            return { ok: true, output: await execShell(job.data.cmd) };
+          if (job.kind === 'shell') { return { ok: true, output: await execShell(job.data.cmd) }; }
+          if (job.kind === 'screenshot') {
+            const shot = await captureScreen();
+            return { ok: true, base64: toBase64(shot.bytes), mime: shot.mime };
           }
-          if (job.kind === 'pull') {
-            const r = await pullFile(STATE.hdc, job.data.path, { log: (m) => pushHdcLog('INFO', m) });
-            return { ok: true, bytes: r.bytes.length, base64: toBase64(r.bytes) };
-          }
-          if (job.kind === 'push') {
-            const bytes = fromBase64(job.data.base64);
-            const r = await pushFile(STATE.hdc, job.data.path, bytes, { log: (m) => pushHdcLog('INFO', m) });
-            return { ok: true, bytes: r.bytes, chunks: r.chunks };
-          }
+          return await doTransferJob(job);
         } catch (e2) {
           return { ok: false, error: `重连后重试仍失败：${String(e2 && e2.message ? e2.message : e2)}` };
         }
@@ -8214,8 +8398,8 @@ function MobileBridgeSection(props) {
       ),
     ));
 
-    // ---- 本地安装（绕开 WebUSB，用本机 hdc.exe）----
-    children.push(h('details', { key: 'locinstall', className: 'mb-card', style: { marginTop: '10px' } },
+    // ---- 本地安装（绕开 WebUSB，用本机 hdc.exe）---- 仅鸿蒙：包是 HAP
+    if (info.kind === 'hdc') children.push(h('details', { key: 'locinstall', className: 'mb-card', style: { marginTop: '10px' } },
       h('summary', { style: { cursor: 'pointer', userSelect: 'none' } }, '本地安装（推荐：用电脑上的 hdc.exe）'),
       h('div', { className: 'mb-note', style: { marginTop: '6px', lineHeight: 1.7 } },
         '如果 WebUSB 一直报「设备被独占」，用这个方法：下载已签名的安装包，'

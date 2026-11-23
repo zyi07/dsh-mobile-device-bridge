@@ -5,9 +5,10 @@ import AdbWebCredentialStore from '@yume-chan/adb-credential-web';
 import { HdcTransport, HdcSession, diagnoseUsb } from './hdc/transport.js';
 import { generateKeyPair as hdcGenerateKeyPair, DAEMON_VERSION, importHdcKey } from './hdc/session.js';
 import { pushFile, pullFile, installHap, uninstallBundle, sha256Remote, writeChunkAt } from './hdc/files.js';
+import { pushFileAdb, pullFileAdb, installApkAdb, uninstallPackageAdb } from './adb/files.js';
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r91';
+const BUILD_TAG = 'r92';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -189,6 +190,34 @@ async function releaseStaleUsbHandles() {
  * USB 掉线自愈：WebUSB 的 transfer 抛错后句柄即失效，此时用 getDevices() 取已授权设备
  * 重新走一遍连接（密钥已保存，通常无需上机确认）。
  */
+/** Android 断线自愈：用 getDevices() 取已授权设备重新 attach（不需要用户手势） */
+async function tryReconnectAdb() {
+  const manager = AdbDaemonWebUsbDeviceManager.BROWSER;
+  if (!manager) { return false; }
+  try {
+    const list = await manager.getDevices();
+    const want = STATE.info && STATE.info.serial;
+    const dev = (want && list.find((d) => d.serial === want)) || list[0];
+    if (!dev) { return false; }
+    pushHdcLog('ADB', 'USB 句柄失效，尝试自动重连');
+    const next = await attach(dev);
+    STATE.kind = 'adb';
+    STATE.info = next;
+    pushHdcLog('ADB', '自动重连成功');
+    return true;
+  } catch (e) {
+    pushHdcLog('ADB', `自动重连失败：${(e && e.message) || e}`);
+    return false;
+  }
+}
+
+/** 按当前平台重连 */
+async function tryReconnectAny() {
+  if (STATE.kind === 'hdc') { return tryReconnectHdc(); }
+  if (STATE.kind === 'adb') { return tryReconnectAdb(); }
+  return false;
+}
+
 async function tryReconnectHdc() {
   if (typeof navigator === 'undefined' || !navigator.usb) { return false; }
   try {
@@ -711,6 +740,71 @@ const DIAG = { state: 'init', polls: 0, lastOk: 0, error: null, injected: null }
 const POLL_INTERVAL_MS = 1500;
 
 /** 执行一条宿主派下来的任务。 */
+/**
+ * 执行一个桥接任务。push/pull/install/uninstall 按当前平台分派到 HDC 或 ADB 实现。
+ */
+async function doTransferJob(job) {
+  const log = (m) => pushHdcLog('INFO', m);
+  const kind = job.kind;
+  const d = job.data;
+  const bytes = (d && d.base64) ? fromBase64(d.base64) : null;
+
+  if (kind === 'push') {
+    if (STATE.hdc) {
+      // 分片模式：只写这一块（幂等，精确偏移）
+      if (typeof d.index === 'number' && d.chunkSize) {
+        const r = await writeChunkAt(STATE.hdc, d.path, bytes, d.chunkSize, d.index, { log });
+        return { ok: true, bytes: r.bytes, chunk: d.index };
+      }
+      log(`开始上传 ${bytes.length} 字节 → ${d.path}`);
+      const r = await pushFile(STATE.hdc, d.path, bytes, { log });
+      return { ok: true, bytes: r.bytes, chunks: r.chunks };
+    }
+    if (STATE.adb) {
+      log(`开始上传 ${bytes.length} 字节 → ${d.path}`);
+      const r = await pushFileAdb(STATE.adb, d.path, bytes, { log });
+      return { ok: true, bytes: r.bytes };
+    }
+    return { ok: false, error: '未连接设备' };
+  }
+
+  if (kind === 'pull') {
+    if (STATE.hdc) {
+      log(`开始下载 ${d.path}`);
+      const r = await pullFile(STATE.hdc, d.path, { log });
+      return { ok: true, bytes: r.bytes.length, base64: toBase64(r.bytes) };
+    }
+    if (STATE.adb) {
+      log(`开始下载 ${d.path}`);
+      const r = await pullFileAdb(STATE.adb, d.path, { log });
+      return { ok: true, bytes: r.bytes.length, base64: toBase64(r.bytes) };
+    }
+    return { ok: false, error: '未连接设备' };
+  }
+
+  if (kind === 'install') {
+    if (STATE.hdc) {
+      log(`开始安装 ${d.filename}（${bytes.length} 字节）`);
+      const r = await installHap(STATE.hdc, { bytes, filename: d.filename, replace: !!d.replace }, { log });
+      return { ok: true, output: r.output };
+    }
+    if (STATE.adb) {
+      log(`开始安装 APK ${d.filename}（${bytes.length} 字节）`);
+      const r = await installApkAdb(STATE.adb, { bytes, filename: d.filename, replace: !!d.replace }, { log });
+      return { ok: true, output: r.output };
+    }
+    return { ok: false, error: '未连接设备' };
+  }
+
+  if (kind === 'uninstall') {
+    if (STATE.hdc) { return { ok: true, output: await uninstallBundle(STATE.hdc, d.bundle) }; }
+    if (STATE.adb) { return { ok: true, output: await uninstallPackageAdb(STATE.adb, d.bundle) }; }
+    return { ok: false, error: '未连接设备' };
+  }
+
+  return { ok: false, error: '未知任务类型 ' + kind };
+}
+
 async function runJob(job) {
   if (!STATE.adb && !STATE.hdc) { return { ok: false, error: '浏览器端尚未连接设备（请在设置页点「连接设备」）' }; }
   const token = STATE.connectToken;
@@ -730,62 +824,24 @@ async function runJob(job) {
       return { ok: true, base64: toBase64(shot.bytes), mime: shot.mime };
     }
     if (job.kind === 'push' || job.kind === 'pull' || job.kind === 'install' || job.kind === 'uninstall') {
-      if (STATE.kind !== 'hdc' || !STATE.hdc) {
-        return { ok: false, error: '文件传输/安装目前只支持 HarmonyOS 通道（Android 侧待接入 Tango sync）' };
-      }
-      const log = (m) => pushHdcLog('INFO', m);
-      if (job.kind === 'push') {
-        const bytes = fromBase64(job.data.base64);
-        // 分片模式：只写这一块（幂等，写到精确偏移）
-        if (typeof job.data.index === 'number' && job.data.chunkSize) {
-          const r = await writeChunkAt(STATE.hdc, job.data.path, bytes, job.data.chunkSize, job.data.index, { log });
-          return { ok: true, bytes: r.bytes, chunk: job.data.index };
-        }
-        log(`开始上传 ${bytes.length} 字节 → ${job.data.path}`);
-        const r = await pushFile(STATE.hdc, job.data.path, bytes, { log });
-        if (stale()) { return { ok: false, error: '连接已切换，任务作废' }; }
-        return { ok: true, bytes: r.bytes, chunks: r.chunks };
-      }
-      if (job.kind === 'pull') {
-        log(`开始下载 ${job.data.path}`);
-        const r = await pullFile(STATE.hdc, job.data.path, { log });
-        if (stale()) { return { ok: false, error: '连接已切换，任务作废' }; }
-        return { ok: true, bytes: r.bytes.length, base64: toBase64(r.bytes) };
-      }
-      if (job.kind === 'install') {
-        const bytes = fromBase64(job.data.base64);
-        log(`开始安装 ${job.data.filename}（${bytes.length} 字节）`);
-        const r = await installHap(STATE.hdc, {
-          bytes, filename: job.data.filename, replace: !!job.data.replace,
-        }, { log });
-        return { ok: true, output: r.output };
-      }
-      if (job.kind === 'uninstall') {
-        const out = await uninstallBundle(STATE.hdc, job.data.bundle);
-        return { ok: true, output: out };
-      }
+      const r = await doTransferJob(job);
+      if (stale() && r.ok) { return { ok: false, error: '连接已切换，任务作废' }; }
+      return r;
     }
     return { ok: false, error: '未知任务类型 ' + job.kind };
   } catch (e) {
     const msg = String(e && e.message ? e.message : e);
-    // USB 掉线：句柄已失效，尝试自动重连后重试一次同一个任务
-    if (/transferIn|transferOut|USBDevice|disconnect|lost|No device/i.test(msg)
-        && STATE.kind === 'hdc' && !stale()) {
-      const ok = await tryReconnectHdc();
+    // USB 掉线：按平台自动重连，然后重试同一任务一次
+    if (/transferIn|transferOut|USBDevice|disconnect|lost|No device|socket|closed/i.test(msg) && !stale()) {
+      const ok = await tryReconnectAny();
       if (ok) {
         try {
-          if (job.kind === 'shell') {
-            return { ok: true, output: await execShell(job.data.cmd) };
+          if (job.kind === 'shell') { return { ok: true, output: await execShell(job.data.cmd) }; }
+          if (job.kind === 'screenshot') {
+            const shot = await captureScreen();
+            return { ok: true, base64: toBase64(shot.bytes), mime: shot.mime };
           }
-          if (job.kind === 'pull') {
-            const r = await pullFile(STATE.hdc, job.data.path, { log: (m) => pushHdcLog('INFO', m) });
-            return { ok: true, bytes: r.bytes.length, base64: toBase64(r.bytes) };
-          }
-          if (job.kind === 'push') {
-            const bytes = fromBase64(job.data.base64);
-            const r = await pushFile(STATE.hdc, job.data.path, bytes, { log: (m) => pushHdcLog('INFO', m) });
-            return { ok: true, bytes: r.bytes, chunks: r.chunks };
-          }
+          return await doTransferJob(job);
         } catch (e2) {
           return { ok: false, error: `重连后重试仍失败：${String(e2 && e2.message ? e2.message : e2)}` };
         }
@@ -1279,8 +1335,8 @@ function MobileBridgeSection(props) {
       ),
     ));
 
-    // ---- 本地安装（绕开 WebUSB，用本机 hdc.exe）----
-    children.push(h('details', { key: 'locinstall', className: 'mb-card', style: { marginTop: '10px' } },
+    // ---- 本地安装（绕开 WebUSB，用本机 hdc.exe）---- 仅鸿蒙：包是 HAP
+    if (info.kind === 'hdc') children.push(h('details', { key: 'locinstall', className: 'mb-card', style: { marginTop: '10px' } },
       h('summary', { style: { cursor: 'pointer', userSelect: 'none' } }, '本地安装（推荐：用电脑上的 hdc.exe）'),
       h('div', { className: 'mb-note', style: { marginTop: '6px', lineHeight: 1.7 } },
         '如果 WebUSB 一直报「设备被独占」，用这个方法：下载已签名的安装包，'

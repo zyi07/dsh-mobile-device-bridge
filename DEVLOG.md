@@ -1195,3 +1195,30 @@ Must be handling a user gesture to show a permission request
 
 **验证方式（不再让用户反复试）：** 用 Playwright 把 CSS 抽出来渲成静态页，
 分别在深色/浅色背景下截图 —— 六种按钮（普通/primary/disabled）全部清晰可读。
+
+## 2026-11-23 08:55 - 补齐 Android 侧文件传输 / 安装 / 断线自愈（r92）
+
+按用户要求，按审计报告的 1→2→3 顺序补齐，第 4 项（UI 按平台隐藏）一并做。
+
+**依据真实类型定义（不猜）：** `@yume-chan/adb@2.6.4`
+- `await adb.sync()` → `AdbSync`
+- `sync.write({ filename, file: ReadableStream<Uint8Array> })` 推文件
+- `sync.read(filename)` → `ReadableStream<Uint8Array>` 拉文件
+- `sync.dispose()` 必须调用（否则 socket 泄漏）
+- `adb.subprocess.shellProtocol/noneProtocol.spawnWaitText()` 跑 shell
+- `adb.getProp(key)` 读属性
+
+**新增 `src-client/adb/files.js`：**
+- `pushFileAdb` / `pullFileAdb`：ADB sync 协议（二进制流式，比鸿蒙的 shell+base64 快得多）
+- `sha256Adb`：远端校验
+- `installApkAdb`：推到 /data/local/tmp → `pm install [-r]`，含 INSTALL_FAILED_* 错误码翻译
+- `uninstallPackageAdb`：`pm uninstall`
+
+**main.js：**
+- 抽出 `doTransferJob(job)`：push/pull/install/uninstall 按 `STATE.hdc` / `STATE.adb` 分派
+- 移除旧的「只支持 HarmonyOS 通道」硬拦截
+- 新增 `tryReconnectAdb()` + `tryReconnectAny()`：Android 也能 USB 掉线自愈
+- 失败重试正则扩到 `socket|closed`
+- 「本地安装（hdc.exe）」区块改为**仅鸿蒙显示**（下载的是 HAP）
+
+构建 r92。**待真机验证：需接 Android 设备（TNY-AL00）测 push/pull/install。**
