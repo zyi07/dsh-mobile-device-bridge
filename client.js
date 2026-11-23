@@ -7235,7 +7235,7 @@ async function uninstallPackageAdb(adb, pkg) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r108';
+const BUILD_TAG = 'r109';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -7831,13 +7831,24 @@ async function connectHarmonyInner(t, device, token) {
   // 注意：探测失败**不应**导致连接失败——模型/API 只是展示信息。
   let model = '';
   let api = '';
+  let osRelease = '';     // 系统主版本号，例如 7.0.0.111
   let online = '';
   try {
     for (let round = 1; round <= 5; round++) {
       if (STATE.connectToken !== token) { break; }
       model = await probe(['const.product.model', 'const.product.name', 'const.product.brand']);
       if (model) {
-        api = await probe(['const.ohos.apiversion', 'const.product.software.version']);
+        api = await probe(['const.ohos.apiversion']);
+        // 系统版本号：const.ohos.fullname 形如 OpenHarmony-7.0.0.111 → 取 7.0.0.111
+        const fullname = await probe(['const.ohos.fullname']);
+        const mv = String(fullname || '').match(/(\d+\.\d+\.\d+(?:\.\d+)?)/);
+        osRelease = mv ? mv[1] : '';
+        if (!osRelease) {
+          // 兜底：const.product.software.version 形如 "PLA-AL10 7.0.0.111(SP12C00E111R9P3)"
+          const soft = await probe(['const.product.software.version']);
+          const m2 = String(soft || '').match(/(\d+\.\d+\.\d+(?:\.\d+)?)/);
+          osRelease = m2 ? m2[1] : '';
+        }
         online = await probe(['const.product.devicetype']);
         break;
       }
@@ -7847,7 +7858,7 @@ async function connectHarmonyInner(t, device, token) {
   } catch (e) {
     t.emit('INFO', `设备信息探测失败（不影响连接）：${(e && e.message) || e}`);
   }
-  t.emit('INFO', `探测结果 机型=${model || '?'} API=${api || '?'} 类型=${online || '?'}`);
+  t.emit('INFO', `探测结果 机型=${model || '?'} 版本=${osRelease || '?'} API=${api || '?'} 类型=${online || '?'}`);
 
   STATE.hdc = session;
   STATE.hdcPending = null;
@@ -7862,7 +7873,7 @@ async function connectHarmonyInner(t, device, token) {
       || ((device.productName && !/HDC|Interface/i.test(device.productName)) ? device.productName : '')
       || 'HarmonyOS 设备',
     os: api ? `HarmonyOS (API ${api})` : 'HarmonyOS',
-    sysVersion: api ? `HarmonyOS (API ${api})` : 'HarmonyOS',
+    sysVersion: osRelease ? `HarmonyOS ${osRelease}` : (api ? `HarmonyOS (API ${api})` : 'HarmonyOS'),
     devtype: online,
     auth: authText.split('\n').filter(Boolean).slice(-1)[0] || '',
   };

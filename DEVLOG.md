@@ -1444,3 +1444,12 @@ model/api 全探测失败，走 fallback。修复：`connectHarmony` 把 token �
 - `STATE.notify` 改为触发刷新（实时日志写 STATE.log，由卡片/连接中实时区显示）
 
 构建 r108。
+
+## 2026-11-23 11:40 - 鸿蒙系统版本号显示 HarmonyOS 7.x（r109）
+
+用户要系统主版本号（HarmonyOS 7），之前只显示 API 26。
+真机探测确认字段：
+- `const.ohos.fullname` = `OpenHarmony-7.0.0.111` → 正则取 `7.0.0.111`
+- 兜底 `const.product.software.version` = `PLA-AL10 7.0.0.111(SP12C00E111R9P3)`
+sysVersion 改为 `HarmonyOS 7.0.0.111`；另把 api 探测的候选去掉 software.version（避免 api 被版本号污染）。
+构建 r109。
