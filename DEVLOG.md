@@ -1222,3 +1222,29 @@ Must be handling a user gesture to show a permission request
 - 「本地安装（hdc.exe）」区块改为**仅鸿蒙显示**（下载的是 HAP）
 
 构建 r92。**待真机验证：需接 Android 设备（TNY-AL00）测 push/pull/install。**
+
+## 2026-11-23 09:25 - 【重要 bug】轮询循环被长任务阻塞（r93）
+
+**现象：** 执行 `pm install`（卡在 Android 安装确认弹窗）后，插件所有命令全部发不出去，
+宿主报「浏览器端没有在轮询（超过 75 秒）」，连截图都失败。用户一度以为是浏览器冻结。
+
+**真正原因（我们自己的 bug）：**
+```js
+while (!stopped) {
+  const res = await poll();
+  if (job) { const outcome = await runJob(job); ... }   // ← 同步等待
+}
+```
+`runJob` 里 `pm install` 卡住 230 秒，这行 `await` 直接把**整条轮询循环**堵死，
+于是不再 poll、不再发心跳，宿主判定浏览器失联，后续任务全部排队失败。
+
+**这也解释了之前鸿蒙 10MB 推送「掉线」的现象**——很可能不是 USB 断了，
+而是长时间任务阻塞轮询，宿主误判超时。
+
+**修复（r93）：**
+- 轮询循环只负责 `poll` 取任务 → **入队**，绝不 await 执行
+- 新增独立 `runner()` 串行执行队列里的任务（仍保证设备通道不并发冲突）
+- 结果单独回传；宿主已超时则忽略
+- 队列上限 32，避免堆积
+
+构建 r93。

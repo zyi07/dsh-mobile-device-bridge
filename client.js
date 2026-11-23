@@ -7169,7 +7169,7 @@ async function uninstallPackageAdb(adb, pkg) {
 }
 
 /** 客户端构建标记：显示在面板并随 poll 上报，用来确认浏览器加载的是哪一版 */
-const BUILD_TAG = 'r92';
+const BUILD_TAG = 'r93';
 
 /** 浏览器里持久化的 HDC 私钥（PKCS#8 PEM）。同一把密钥只授权一次。 */
 const HDC_KEY_STORE = 'mobile-bridge.hdc.pkcs8';
@@ -7918,6 +7918,31 @@ function startBridge(connection) {
   STATE.connection = connection;
   let stopped = false;
   DIAG.state = 'polling';
+
+  // 任务队列：轮询只负责"取任务入队"，执行交给独立 runner 串行跑。
+  // 关键：绝不能在轮询循环里 await 长任务（pm install 等待弹窗、大文件传输等），
+  // 否则整条轮询会停摆，宿主会判定"浏览器没有在轮询"，连心跳都没了。
+  const queue = [];
+  let running = false;
+
+  async function runner() {
+    if (running) { return; }
+    running = true;
+    while (queue.length && !stopped) {
+      const job = queue.shift();
+      let outcome;
+      try {
+        outcome = await runJob(job);
+      } catch (e) {
+        outcome = { ok: false, error: String(e && e.message ? e.message : e) };
+      }
+      try {
+        await connection.rpc.call(BRIDGE, EP + '/result', Object.assign({ id: job.id }, outcome));
+      } catch { /* 宿主可能已超时，忽略 */ }
+    }
+    running = false;
+  }
+
   (async () => {
     while (!stopped) {
       const started = Date.now();
@@ -7926,7 +7951,6 @@ function startBridge(connection) {
           device: STATE.info
             ? { model: STATE.info.model, android: STATE.info.android, serial: STATE.info.serial }
             : null,
-          // 带上客户端身份与最近日志：宿主会落盘，便于判断浏览器跑的是哪一版
           build: BUILD_TAG,
           log: STATE.log && STATE.log.length ? STATE.log.slice(-80) : undefined,
         });
@@ -7934,9 +7958,9 @@ function startBridge(connection) {
         DIAG.lastOk = Date.now();
         DIAG.error = null;
         if (res && res.ok && res.value && res.value.job) {
-          const job = res.value.job;
-          const outcome = await runJob(job);
-          await connection.rpc.call(BRIDGE, EP + '/result', Object.assign({ id: job.id }, outcome));
+          // 只入队，不等待执行
+          if (queue.length < 32) { queue.push(res.value.job); }
+          runner();
         }
       } catch (e) {
         DIAG.error = String(e && e.message ? e.message : e);
