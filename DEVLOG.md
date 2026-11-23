@@ -1582,3 +1582,20 @@ exec/screenshot 全部报「浏览器没有报告已连接设备」；diag.lastL
 **未做：** `/agc/sign` 端点、AGC 自动申请证书/Profile。需要登录态 + AGC 网页自动化，工程量大，待用户决策。
 
 构建 0.1.4。
+
+## 2026-11-23 17:45 - 华为登录改走 DevEco OAuth loopback（真机验证通过）
+
+**做了什么：**
+- `tools/agc_login.py` 重写登录链路：`apply?port&appid=1009&code` → 本地双栈回调服务 → `POST /callback` 的 tempToken → `temptoken/check`（直接返回 JWT）→ 落盘 `/root/.dsh/agc-session.json`（含 jwt/cookies，source=deveco-oauth）
+- 已登录账号时页面停在「允许 DevEco CLI 访问帐号」确认页，按钮是 `div#btn-confirm.btn-consent.btn-confirm`，必须按 class 点（`text=允许` 无效）
+- 二维码截取改成一次 JS 求值 + 包围盒裁剪（旧实现 6 个选择器各等 6s，对不上就卡 8 分钟 → 面板转圈）
+- 删除面板里「已用你的调试证书签名 / 自动申请证书与 Profile」的不实文案；示例包标注固定包名 com.dsh.bridgeapp，仅供验证 hdc 安装链路
+- 提交 3af2892，版本 0.1.6
+
+**验证：**
+- 直连脚本：`start-force` → 13s 拿到 580×580 二维码
+- 已登录态：`/mbridge/agc/login/start` 7.5s 点掉「允许」；`/mbridge/agc/login/status` 返回 `state=success, hasJwt=true, cookieCount=38`
+
+**待做什么：**
+- AGC 业务 API（`connect-api.cloud.huawei.com` 的 user-team-list / device/add / cert/add / provision/add）用 JWT 调用全部 401，header 组合试过 oauth2Token/uid/teamId/Bearer/accessToken 均不通 —— 需要抓 DevEco 或 AGC 控制台的真实请求再定协议，不能靠猜
+- 自动签名链路（设备注册→证书→Profile→hap-sign-tool 签名）尚未打通
