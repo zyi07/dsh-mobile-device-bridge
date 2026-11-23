@@ -91,8 +91,11 @@ class LoginSession:
             executable_path=CHROME, headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
+        # 复用已保存的登录态（cookie + localStorage），否则每次都要重新扫码
+        _state = COOKIE_FILE if os.path.exists(COOKIE_FILE) else None
         self.ctx = await self.browser.new_context(
             user_agent=UA, viewport={"width": 1280, "height": 900}, locale="zh-CN",
+            **({"storage_state": _state} if _state else {}),
         )
         self.page = await self.ctx.new_page()
         await self.page.goto(AGC_URL, wait_until="domcontentloaded", timeout=45000)

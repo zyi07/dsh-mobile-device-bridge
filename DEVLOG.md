@@ -1563,3 +1563,22 @@ exec/screenshot 全部报「浏览器没有报告已连接设备」；diag.lastL
 `exec` 首次超时是浏览器页面停止轮询（browserAlive:false，113s 未 poll），非工具 bug。
 
 构建 0.1.3。
+
+## 2026-11-23 15:55 - 0.1.4 修 cookie 复用 + 文案；签名链硬障碍确认
+
+**报告（ID自签名尝试报告）技术分析全部成立，我认：插件从未实现"对任意 HAP 签名"。**
+
+**已修：**
+1. **cookie 复用（真 bug）**：`agc_login.py` 的 `new_context()` 从未加载 `COOKIE_FILE`，只有写入没有读取 →
+   每次都要重新扫码。改为 `storage_state=COOKIE_FILE`（存在时）。
+2. **虚假文案**：`accountHint` 声称"自动申请证书、生成 Profile 并给 HAP 签名"，
+   `agcTitle` 写"用于自动签名安装" → 改为与实现一致（登录态持久；证书/Profile 由 AGC 签发；插件传输与安装已签名 HAP）。
+
+**硬障碍（本次实测）：** `sign_hap.py` 用 `DSH_SIGN_PW` 调 hap-sign-tool 报
+`Init keystore failed: password was incorrect` → **keystore 密码已丢失**，`/root/agc-test` 的
+证书/Profile 不可复用。要支持"任意 HAP 签名"，必须 AGC 重建：新 keystore + 新 CSR/证书 +
+按目标 bundle 的调试 Profile（现有 profile 绑定 `com.dsh.bridgeapp`，签 `io.legado.app.harmony` 必被拒）。
+
+**未做：** `/agc/sign` 端点、AGC 自动申请证书/Profile。需要登录态 + AGC 网页自动化，工程量大，待用户决策。
+
+构建 0.1.4。
