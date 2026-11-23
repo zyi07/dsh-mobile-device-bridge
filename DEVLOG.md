@@ -1504,3 +1504,20 @@ sysVersion 改为 `HarmonyOS 7.0.0.111`；另把 api 探测的候选去掉 softw
 - package.json name、cordis.patch.yml 的 moduleName、README 标题、**build.mjs 的 client module id**（必须与包名一致）全部改名
 - 重新 build + pack → dsh-mobile-device-bridge-0.1.0.tgz
 - profile：remove 旧 dsh-mobile-bridge → install 新包，验证真实目录、lib 存在、/mbridge/status 正常
+
+## 2026-11-23 12:30 - 发版修复 0.1.1 + GitHub 推送
+
+**发现 0.1.0 的发版缺陷：** `files` 漏了运行时依赖 →
+- `tools/agc_login.py`（index.js 第 74 行 spawn，华为账号登录/签名）**缺失 → 签名功能坏**
+- `assets/dsh_demo_signed.hap`（下载签名包路由）缺失
+- `extension`（extension.zip 路由）缺失
+
+**0.1.1 修复：** files 补 `tools/agc_login.py`、`extension`、`assets`；版本 bump 0.1.1；包 10.3MB/17 文件。
+
+**GitHub 仓库清理：** 从 git 移除被跟踪的 `node_modules`（1344 文件 / 48MB）与 `__pycache__`，
+更新 .gitignore；仓库降到 54 个源码/资源文件。推送至
+`git@github.com:zyi07/dsh-mobile-device-bridge.git`（0c7c47d）。
+
+**profile：** 升级到 0.1.1（tools/assets/extension 均在，插件运行正常）。
+
+**待办：** `npm publish` 发 0.1.1（0.1.0 缺脚本），然后向 awesome-dsh-plugin 提 PR。
