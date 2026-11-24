@@ -225,17 +225,41 @@ def sign_hap(unsigned, out, p12, pwd, cer, p7b):
     return out
 
 
+def hap_info(hap):
+    """从 HAP 里读 module.json，拿到包名/版本（包名不用人肉输入）"""
+    import zipfile
+    with zipfile.ZipFile(hap) as z:
+        d = json.loads(z.read("module.json"))
+    app = d.get("app") or {}
+    m = d.get("module") or {}
+    return {
+        "bundleName": app.get("bundleName") or d.get("bundleName") or "",
+        "versionName": app.get("versionName") or "",
+        "versionCode": app.get("versionCode"),
+        "moduleName": m.get("name") or "",
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hap", required=True, help="未签名的 HAP")
-    ap.add_argument("--bundle", required=True, help="bundleName（profile 绑定的包名）")
+    ap.add_argument("--bundle", default="", help="bundleName；留空则自动从 HAP 的 module.json 读取")
+    ap.add_argument("--info", action="store_true", help="只读取 HAP 信息并输出 JSON，不签名")
     ap.add_argument("--out", default="", help="输出文件（默认 <hap>-signed.hap）")
     ap.add_argument("--product", default="", help="provisionName 前缀，可留空")
     ap.add_argument("--udid", default="", help="目标设备 UDID；留空则用账号里所有设备")
     ap.add_argument("--device-type", default="4", help="设备类型码，手机=4")
-    ap.add_argument("--workdir", default="", help="材料目录（默认临时目录）")
+    ap.add_argument("--workdir", default="", help="材料目录（默认 ~/.dsh/agc-sign）")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
+
+    if a.info:
+        print(json.dumps(hap_info(a.hap), ensure_ascii=False))
+        return 0
+    if not a.bundle:
+        a.bundle = hap_info(a.hap)["bundleName"]
+        if not a.bundle:
+            raise SystemExit("HAP 里没有 bundleName，请用 --bundle 指定")
 
     out = a.out or (os.path.splitext(a.hap)[0] + "-signed.hap")
     # 密钥材料必须持久复用：每次新 p12 就会申请一张新证书，AGC 有数量上限，

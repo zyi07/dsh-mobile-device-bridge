@@ -503,20 +503,43 @@ async function agcClearSession() {
 
 /** 给未签名 HAP 走「AGC 申请证书/Profile + 本地签名」，签完自动装到当前设备 */
 async function agcSignInstall(file) {
-  const bundle = String((STATE.sign && STATE.sign.bundle) || '').trim();
-  if (!bundle) {
-    STATE.sign = { ...(STATE.sign || {}), busy: false, ok: false, msg: '先在输入框填包名 bundleName（如 com.example.app）' };
-    if (STATE.notify) { STATE.notify(); }
-    return;
-  }
-  STATE.sign = { ...(STATE.sign || {}), busy: true, ok: true, msg: `正在签名 ${file.name}（首次要申请证书/Profile，约 20~40 秒）…` };
+  STATE.sign = { ...(STATE.sign || {}), busy: true, ok: true, msg: `读取 ${file.name} 的包信息…` };
   if (STATE.notify) { STATE.notify(); }
+  // 读文件 + 自动识别包名（包名从 HAP 的 module.json 读，不用人肉输入）
+  let b64 = '';
   try {
     const u8 = new Uint8Array(await file.arrayBuffer());
     let bin = '';
     const CH = 0x8000;
     for (let i = 0; i < u8.length; i += CH) { bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH)); }
-    const b64 = btoa(bin);
+    b64 = btoa(bin);
+  } catch (e) {
+    STATE.sign = { ...STATE.sign, busy: false, ok: false, msg: '读文件失败：' + String(e && e.message ? e.message : e) };
+    if (STATE.notify) { STATE.notify(); }
+    return;
+  }
+  let bundle = String((STATE.sign && STATE.sign.bundle) || '').trim();
+  if (!bundle) {
+    try {
+      const ri = await fetch(AGC_API + '/hap-info', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ filename: file.name, base64: b64 }),
+      });
+      const di = await ri.json();
+      if (di && di.bundleName) {
+        bundle = di.bundleName;
+        STATE.sign = { ...(STATE.sign || {}), bundle };
+      }
+    } catch { /* 读不到就让用户手填 */ }
+  }
+  if (!bundle) {
+    STATE.sign = { ...(STATE.sign || {}), busy: false, ok: false, msg: '读不到包名，请在输入框填 bundleName 后再选一次文件' };
+    if (STATE.notify) { STATE.notify(); }
+    return;
+  }
+  STATE.sign = { ...(STATE.sign || {}), busy: true, ok: true, msg: `包名 ${bundle}，正在签名并安装（首次要申请证书/Profile，约 20~40 秒）…` };
+  if (STATE.notify) { STATE.notify(); }
+  try {
     const r = await fetch(AGC_API + '/sign', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ filename: file.name, base64: b64, bundle, autoInstall: true }),
@@ -524,7 +547,7 @@ async function agcSignInstall(file) {
     const d = await r.json();
     const info = d.sign || {};
     if (!d.ok) { throw new Error(info.error || d.error || '签名失败'); }
-    let msg = '✅ 签名成功\n输出：' + (info.signedPath || '') + '\n证书：' + (info.certName || '-');
+    let msg = '✅ 签名成功\n包名：' + (info.bundle || bundle) + '\n输出：' + (info.signedPath || '') + '\n证书：' + (info.certName || '-');
     if (d.installed) {
       msg += '\n安装：' + (d.installed.ok ? (d.installed.output || 'ok') : ('失败 ' + (d.installed.error || '')));
     }
@@ -1195,10 +1218,10 @@ function buildHuaweiAccountPanel(t) {
     out.push(h('div', { key: 'acc-sign', className: 'mb-card', style: { marginTop: '10px' } },
       h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '给 HAP 自动签名并安装'),
       h('div', { className: 'mb-note', style: { lineHeight: 1.7 } },
-        '选一个未签名的 .hap：插件用它向 AGC 申请调试证书/Profile，本地签名后自动装到当前设备。'),
+        '选一个未签名的 .hap：自动读取包名 → 申请调试证书/Profile → 签名 → 装到当前设备。包名不用手输。'),
       h('div', { className: 'mb-row', style: { marginTop: '8px', gap: '8px', flexWrap: 'wrap' } },
         h('input', {
-          className: 'mb-input', placeholder: '包名 bundleName，如 com.example.app',
+          className: 'mb-input', placeholder: '包名（选文件后自动识别，可改）',
           value: sg.bundle || '', spellCheck: false,
           onChange: (ev) => { STATE.sign = { ...(STATE.sign || {}), bundle: ev.target.value }; },
           style: { flex: '1 1 220px' },

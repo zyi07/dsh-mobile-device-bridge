@@ -1680,3 +1680,12 @@ p7b 内 bundle-name=com.dsh.bridgeapp、device-ids 含本机 UDID。
 - `POST /mbridge/agc/sign {hapPath,...}` → 7.3s ok，signedPath 650526 字节，复用证书 `auto_debug_..._ac00cb0b.cer`
 - agent 工具 `mobile_bridge_sign_install` 直接调用 → “签名成功 (650524 字节…)”
 - 卸载测试壳：`/mbridge/uninstall {com.dsh.bridgeapp}` → `uninstall bundle successfully.`，`bm dump -a | grep -c bridgeapp` = 0
+
+## 2026-11-24 09:00 - 包名改为自动读取（不再手输）
+
+**问题：** 面板选完 .hap 还要求手填 bundleName，用户质疑「不应该自动读吗」。
+**改动：**
+- `tools/agc_sign.py`：新增 `--info`（读 module.json 输出 bundleName/versionName）；`--bundle` 改可选，缺省自动从 HAP 读取
+- host：新增 `POST /mbridge/agc/hap-info`；`/agc/sign` 的 bundle 变可选；agent 工具 `bundle` 变可选
+- client：选文件后自动 `hap-info` 回填包名并直接开始签名+安装，输入框变成可改的覆盖项
+**验证：** `/agc/hap-info` → `{bundleName:"com.dsh.bridgeapp",versionName:"1.0.1"}`；`/agc/sign` 不传 bundle → 8.3s ok，自动识别 com.dsh.bridgeapp。版本 0.2.0。

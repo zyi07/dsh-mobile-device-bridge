@@ -124,7 +124,8 @@ export function apply(ctx) {
     const script = nodePath.join(here, 'tools', 'agc_sign.py');
     const outPath = nodePath.join(nodePath.dirname(hapPath),
       nodePath.basename(hapPath).replace(/\.hap$/i, '') + '-signed.hap');
-    const args = [script, '--hap', hapPath, '--bundle', String(bundle), '--out', outPath, '--json'];
+    const args = [script, '--hap', hapPath, '--out', outPath, '--json'];
+    if (bundle) { args.push('--bundle', String(bundle)); }
     if (udid) { args.push('--udid', String(udid)); }
     const res = await new Promise((resolve) => {
       const p = nodeSpawn('python3', args, { env: process.env });
@@ -291,10 +292,10 @@ export function apply(ctx) {
 
       toolsCtx.tools.register(defineTool({
         name: 'mobile_bridge_sign_install',
-        description: 'Sign an unsigned HarmonyOS HAP with the logged-in Huawei account (AGC debug cert + profile are issued automatically) and optionally install it on a connected phone. Needs a prior QR login in the plugin panel.',
+        description: 'Sign an unsigned HarmonyOS HAP with the logged-in Huawei account (AGC debug cert + profile are issued automatically) and optionally install it on a connected phone. The bundleName is read from the HAP automatically. Needs a prior QR login in the plugin panel.',
         parameters: {
           file: { type: 'string', required: true, description: 'Absolute path to the unsigned .hap.' },
-          bundle: { type: 'string', required: true, description: 'bundleName, e.g. com.example.app.' },
+          bundle: { type: 'string', description: 'Optional bundleName; when omitted it is read from the HAP module.json.' },
           install: { type: 'boolean', description: 'Install after signing (default true).' },
           deviceId: { type: 'string', description: 'Optional device id; defaults to the active device.' },
           udid: { type: 'string', description: 'Optional target UDID; defaults to all devices in the account.' },
@@ -302,7 +303,7 @@ export function apply(ctx) {
         output: { schema: strSchema, render: textOut },
         async execute({ file, bundle, install, deviceId, udid }) {
           const fsMod = await import('node:fs/promises');
-          const info = await signHapFile({ hapPath: String(file), bundle: String(bundle), udid });
+          const info = await signHapFile({ hapPath: String(file), bundle: bundle ? String(bundle) : '', udid });
           if (!info.ok) { return '签名失败: ' + (info.error || ''); }
           const lines = [`签名成功: ${info.signedPath}（${info.bytes || '?'} 字节，证书 ${info.certName || '?'}）`];
           if (install === false) { return lines.join('\n'); }
@@ -645,11 +646,47 @@ export function apply(ctx) {
             return;
           }
 
+          // 读未签名 HAP 的包名/版本（面板选完文件自动回填，不用手工输）
+          if (path === ROUTE_PREFIX + '/agc/hap-info' && req.method === 'POST') {
+            const body = await readBody(req, 256 << 20);
+            const fs = await import('node:fs/promises');
+            const here = nodePath.dirname(nodeFileURLToPath(import.meta.url));
+            const script = nodePath.join(here, 'tools', 'agc_sign.py');
+            let hapPath = String(body.hapPath || '').trim();
+            let tmpDir = '';
+            try {
+              if (!hapPath) {
+                if (!body.base64) { send(res, 400, { ok: false, error: '缺少 hapPath 或 base64' }); return; }
+                tmpDir = await fs.mkdtemp(nodePath.join(nodeOs.tmpdir(), 'mbridge-hapinfo-'));
+                hapPath = nodePath.join(tmpDir, String(body.filename || 'input.hap'));
+                await fs.writeFile(hapPath, Buffer.from(String(body.base64), 'base64'));
+              }
+              const out = await new Promise((resolve) => {
+                const p = nodeSpawn('python3', [script, '--hap', hapPath, '--info', '--json'], { env: process.env });
+                let o = '', e = '';
+                p.stdout.on('data', (c) => { o += c; });
+                p.stderr.on('data', (c) => { e += c; });
+                p.on('close', (code) => resolve({ code, o, e }));
+                p.on('error', (err) => resolve({ code: -1, o: '', e: String(err) }));
+              });
+              let info = null;
+              try { info = JSON.parse((out.o || '').trim().split('\n').filter(Boolean).pop() || '{}'); } catch { info = null; }
+              if (!info || !info.bundleName) {
+                send(res, 200, { ok: false, error: '读不到包名: ' + (out.e || out.o || '').slice(-300) });
+                return;
+              }
+              send(res, 200, { ok: true, ...info });
+            } catch (e) {
+              send(res, 500, { ok: false, error: String(e && e.message ? e.message : e) });
+            }
+            return;
+          }
+
           // 自动签名（AGC 申请证书/Profile + 本地 hap-sign-tool），可选直接安装
           if (path === ROUTE_PREFIX + '/agc/sign' && req.method === 'POST') {
             const body = await readBody(req, 256 << 20);
+            // bundle 可省略：不传就让脚本从 HAP 的 module.json 读
             const bundle = String(body.bundle || '').trim();
-            if (!bundle) { send(res, 400, { ok: false, error: '缺少 bundle（应用包名）' }); return; }
             const fs = await import('node:fs/promises');
             let hapPath = String(body.hapPath || '').trim();
             let tmpDir = '';

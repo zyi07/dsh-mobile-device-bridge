@@ -40,7 +40,7 @@ curl -s -m 5 "$BASE/status"
 | `mobile_bridge_exec` | `cmd`、`deviceId?`、`timeoutMs?` | 在设备上跑 shell |
 | `mobile_bridge_screenshot` | `deviceId?` | 截图并存本地，返回文件路径（再用 read_image 看） |
 | `mobile_bridge_install` | `file`(本地路径)、`deviceId?`、`replace?` | 安装**已签名**的 apk/hap |
-| `mobile_bridge_sign_install` | `file`(未签名 .hap)、`bundle`、`install?`、`deviceId?`、`udid?` | **自动签名并安装**（AGC 证书/Profile + 本地签名）——鸿蒙首选 |
+| `mobile_bridge_sign_install` | `file`(未签名 .hap)、`bundle?`、`install?`、`deviceId?`、`udid?` | **自动签名并安装**（AGC 证书/Profile + 本地签名）——鸿蒙首选；`bundle` 可省，自动从 HAP module.json 读 |
 
 > `mobile_bridge_sign_install` 需要插件里已扫码登录过华为账号；签名材料持久化在 `~/.dsh/agc-sign`，同一把密钥复用同一张证书，不会重复占用 AGC 证书名额。
 
