@@ -1663,3 +1663,20 @@ p7b 内 bundle-name=com.dsh.bridgeapp、device-ids 含本机 UDID。
 **遗留：**
 - 这套能力目前只有命令行 `tools/agc_sign.py`，面板里还没有按钮（加按钮要改 host 路由，需重启宿主）
 - 多标签页时 runJob 会被“没有设备会话的那个标签页”抢答，报「浏览器端尚未连接设备」；重试或只留一个 DSH 标签页可解
+
+## 2026-11-24 08:55 - 面板签名按钮 + agent 工具 + skill 完善
+
+**做了什么：**
+- host `index.js`：新增 `signHapFile()`、`POST /mbridge/agc/sign`（hapPath 或 base64，`autoInstall` 默认 true）、
+  以及 agent 工具 `mobile_bridge_sign_install(file,bundle,install?,deviceId?,udid?)`
+- client `src-client/main.js`：华为账号面板登录成功后新增「给 HAP 自动签名并安装」卡片（包名输入 + 选 .hap + 结果）
+- `tools/agc_sign.py`：
+  - `jwToken/check` 的 `refresh` 改 `"true"`（false 只返回缓存 accessToken，过期后 AGC 全 401）
+  - 默认 workdir 改持久目录 `~/.dsh/agc-sign` 并自动迁移旧密钥 —— 每次新 p12 会申请新证书，AGC 证书数量有上限（实测撞到 `certificate number exceeds limit`）
+- skill `prefer-mobile-bridge`：新增「Agent 工具」表（5 个原生工具）、`/agc/sign` 接口、多标签页抢答重试说明
+- 打包 0.1.9 并用 plugin_manager install_bundle 热升级（宿主代码要重启/重装 bundle 才生效，已生效）
+
+**验证：**
+- `POST /mbridge/agc/sign {hapPath,...}` → 7.3s ok，signedPath 650526 字节，复用证书 `auto_debug_..._ac00cb0b.cer`
+- agent 工具 `mobile_bridge_sign_install` 直接调用 → “签名成功 (650524 字节…)”
+- 卸载测试壳：`/mbridge/uninstall {com.dsh.bridgeapp}` → `uninstall bundle successfully.`，`bm dump -a | grep -c bridgeapp` = 0

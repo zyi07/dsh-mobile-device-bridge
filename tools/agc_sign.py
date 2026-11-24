@@ -81,8 +81,9 @@ def load_jwt():
 
 
 def get_access_token(jwt):
+    # refresh 必须是 "true"：false 只会返回上次缓存的 accessToken（很快就过期 → 后续 AGC 全 401）
     st, d = http_json("GET", f"{CN}/authrouter/auth/api/jwToken/check",
-                      {"jwtToken": jwt, "refresh": "false"})
+                      {"jwtToken": jwt, "refresh": "true"})
     if st != 200 or not d.get("status"):
         raise RuntimeError(f"jwToken/check 失败: HTTP {st} {str(d)[:200]}")
     ui = d.get("userInfo") or {}
@@ -237,7 +238,20 @@ def main():
     a = ap.parse_args()
 
     out = a.out or (os.path.splitext(a.hap)[0] + "-signed.hap")
-    work = a.workdir or tempfile.mkdtemp(prefix="agc-sign-")
+    # 密钥材料必须持久复用：每次新 p12 就会申请一张新证书，AGC 有数量上限，
+    # 很快会报 "certificate number exceeds limit"。
+    work = (a.workdir or os.environ.get("AGC_SIGN_DIR")
+            or os.path.expanduser("~/.dsh/agc-sign"))
+    os.makedirs(work, exist_ok=True)
+    # 首次：把之前生成的密钥材料迁过来（同 p12 → 同证书名 → 复用已有证书，不新增）
+    _legacy = "/root/agc-work"
+    if not os.path.exists(os.path.join(work, "debugKey.pwd")) and os.path.isdir(_legacy):
+        for _fn in os.listdir(_legacy):
+            if _fn.endswith(".p12") or _fn.endswith(".pwd") or _fn.endswith(".cer"):
+                try:
+                    shutil.copy2(os.path.join(_legacy, _fn), os.path.join(work, _fn))
+                except Exception:
+                    pass
     os.makedirs(work, exist_ok=True)
     result = {"ok": False, "workdir": work}
 

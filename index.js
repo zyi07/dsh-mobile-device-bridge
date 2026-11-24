@@ -118,6 +118,36 @@ export function apply(ctx) {
 
   function agcSessionFile() { return nodePath.join(nodeOs.homedir(), '.dsh', 'agc-session.json'); }
 
+  /** 跑 tools/agc_sign.py：AGC 申请证书/Profile + 本地签名。返回解析后的结果对象 */
+  async function signHapFile({ hapPath, bundle, udid }) {
+    const here = nodePath.dirname(nodeFileURLToPath(import.meta.url));
+    const script = nodePath.join(here, 'tools', 'agc_sign.py');
+    const outPath = nodePath.join(nodePath.dirname(hapPath),
+      nodePath.basename(hapPath).replace(/\.hap$/i, '') + '-signed.hap');
+    const args = [script, '--hap', hapPath, '--bundle', String(bundle), '--out', outPath, '--json'];
+    if (udid) { args.push('--udid', String(udid)); }
+    const res = await new Promise((resolve) => {
+      const p = nodeSpawn('python3', args, { env: process.env });
+      let out = '', err = '';
+      p.stdout.on('data', (c) => { out += c; });
+      p.stderr.on('data', (c) => { err += c; });
+      const timer = setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* ignore */ } }, 600000);
+      p.on('close', (code) => { clearTimeout(timer); resolve({ code, out, err }); });
+      p.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, out, err: String(e) }); });
+    });
+    const last = (res.out || '').trim().split('\n').filter(Boolean).pop() || '';
+    let info = null;
+    try { info = JSON.parse(last); } catch { info = { ok: false, error: '签名输出无法解析: ' + last.slice(0, 400) }; }
+    if (!info || !info.ok) {
+      info = Object.assign({}, info || {}, {
+        ok: false,
+        error: (info && info.error) || (res.err || '').slice(-700) || '签名失败',
+      });
+    }
+    info.signedPath = outPath;
+    return info;
+  }
+
   function enqueue(kind, data, timeoutMs) {
     const id = ++seq;
     return new Promise((resolve, reject) => {
@@ -256,6 +286,41 @@ export function apply(ctx) {
             replace: replace !== false,
           }, 300000);
           return res.output || 'ok';
+        },
+      }));
+
+      toolsCtx.tools.register(defineTool({
+        name: 'mobile_bridge_sign_install',
+        description: 'Sign an unsigned HarmonyOS HAP with the logged-in Huawei account (AGC debug cert + profile are issued automatically) and optionally install it on a connected phone. Needs a prior QR login in the plugin panel.',
+        parameters: {
+          file: { type: 'string', required: true, description: 'Absolute path to the unsigned .hap.' },
+          bundle: { type: 'string', required: true, description: 'bundleName, e.g. com.example.app.' },
+          install: { type: 'boolean', description: 'Install after signing (default true).' },
+          deviceId: { type: 'string', description: 'Optional device id; defaults to the active device.' },
+          udid: { type: 'string', description: 'Optional target UDID; defaults to all devices in the account.' },
+        },
+        output: { schema: strSchema, render: textOut },
+        async execute({ file, bundle, install, deviceId, udid }) {
+          const fsMod = await import('node:fs/promises');
+          const info = await signHapFile({ hapPath: String(file), bundle: String(bundle), udid });
+          if (!info.ok) { return '签名失败: ' + (info.error || ''); }
+          const lines = [`签名成功: ${info.signedPath}（${info.bytes || '?'} 字节，证书 ${info.certName || '?'}）`];
+          if (install === false) { return lines.join('\n'); }
+          const buf = await fsMod.readFile(info.signedPath);
+          const r = await pickDevice(deviceId);
+          let out;
+          if (r.mode === 'cli') {
+            out = await cliChannel.install(r.tools, r.dev, buf, nodePath.basename(info.signedPath), true);
+          } else {
+            const res = await enqueue('install', {
+              filename: nodePath.basename(info.signedPath),
+              base64: buf.toString('base64'),
+              replace: true,
+            }, 300000);
+            out = res.output || 'ok';
+          }
+          lines.push('安装: ' + out);
+          return lines.join('\n');
         },
       }));
     })();
@@ -576,6 +641,43 @@ export function apply(ctx) {
               res.end(buf);
             } catch (e) {
               send(res, 404, { ok: false, error: '安装包不存在：' + String(e && e.message ? e.message : e) });
+            }
+            return;
+          }
+
+          // 自动签名（AGC 申请证书/Profile + 本地 hap-sign-tool），可选直接安装
+          if (path === ROUTE_PREFIX + '/agc/sign' && req.method === 'POST') {
+            const body = await readBody(req, 256 << 20);
+            const bundle = String(body.bundle || '').trim();
+            if (!bundle) { send(res, 400, { ok: false, error: '缺少 bundle（应用包名）' }); return; }
+            const fs = await import('node:fs/promises');
+            let hapPath = String(body.hapPath || '').trim();
+            let tmpDir = '';
+            if (!hapPath) {
+              if (!body.base64) { send(res, 400, { ok: false, error: '缺少 hapPath 或 base64（HAP 内容）' }); return; }
+              tmpDir = await fs.mkdtemp(nodePath.join(nodeOs.tmpdir(), 'mbridge-sign-'));
+              hapPath = nodePath.join(tmpDir, String(body.filename || 'input.hap'));
+              await fs.writeFile(hapPath, Buffer.from(String(body.base64), 'base64'));
+            }
+            try {
+              const info = await signHapFile({ hapPath, bundle, udid: body.udid });
+              let installed = null;
+              if (info.ok && body.autoInstall !== false) {
+                if (device || devices.length) {
+                  const buf = await fs.readFile(info.signedPath);
+                  const r = await enqueue('install', {
+                    filename: nodePath.basename(info.signedPath),
+                    base64: buf.toString('base64'),
+                    replace: body.replace !== false,
+                  }, 300000);
+                  installed = { ok: true, output: r.output || 'ok' };
+                } else {
+                  installed = { ok: false, error: '签名成功，但当前没有连接设备，未安装' };
+                }
+              }
+              send(res, 200, { ok: !!info.ok, sign: info, installed });
+            } catch (e) {
+              send(res, 500, { ok: false, error: String(e && e.message ? e.message : e) });
             }
             return;
           }

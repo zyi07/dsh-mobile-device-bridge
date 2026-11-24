@@ -1,7 +1,7 @@
 ---
 name: prefer-mobile-bridge
-description: 当需要连接手机（安卓/鸿蒙）执行命令、截图、传文件、安装/卸载应用，或给鸿蒙 HAP 做 ID 签名并侧载安装（AGC 证书/Profile、no signature file 报错、bm/adb install、sideload）时，优先用 dsh-mobile-bridge 插件的 /mbridge 接口，未连接再回落本机 adb/hdc。
-whenToUse: 要执行 adb/hdc 命令、截屏、推/拉文件、安装或卸载 App、给未签名 HAP 做 ID 签名后安装（bm install 报 no signature file / code:9568320）时；尤其手机插在用户电脑上、当前机器没有 adb/hdc 或没接数据线、需要远程操作设备时。
+description: 当需要通过 adb/hdc 操作手机（执行命令/截图/传文件/安装卸载应用）时，先检查 dsh-mobile-bridge 插件是否已连接设备；已连接就优先用它的 /mbridge 远程接口，未连接再回落本机 adb/hdc 通道。
+whenToUse: 要执行 adb/hdc 命令、截屏、推送/拉取文件、安装或卸载 App 时；尤其是手机插在用户电脑上、当前机器没有 adb/hdc 或没接数据线、需要远程操作设备时。
 tags: adb, hdc, mobile, bridge, webusb
 ---
 
@@ -31,14 +31,28 @@ curl -s -m 5 "$BASE/status"
 - `devices` 为空 / 404 / 连接被拒 → 插件不可用 → **回落本机 adb/hdc**
 - `browserAlive=false` → 用户浏览器标签页不在前台（被节流），**提示用户把 DSH 页面切到前台**
 
-## 插件接口（POST + JSON；除非注明 GET）
+## Agent 工具（同机 agent 首选，比 curl 更省事）
+插件已把常用动作注册成原生工具，直接调用即可（返回值是文本）：
+
+| 工具 | 参数 | 作用 |
+|---|---|---|
+| `mobile_bridge_devices` | — | 列出可用设备（CLI + WebUSB） |
+| `mobile_bridge_exec` | `cmd`、`deviceId?`、`timeoutMs?` | 在设备上跑 shell |
+| `mobile_bridge_screenshot` | `deviceId?` | 截图并存本地，返回文件路径（再用 read_image 看） |
+| `mobile_bridge_install` | `file`(本地路径)、`deviceId?`、`replace?` | 安装**已签名**的 apk/hap |
+| `mobile_bridge_sign_install` | `file`(未签名 .hap)、`bundle`、`install?`、`deviceId?`、`udid?` | **自动签名并安装**（AGC 证书/Profile + 本地签名）——鸿蒙首选 |
+
+> `mobile_bridge_sign_install` 需要插件里已扫码登录过华为账号；签名材料持久化在 `~/.dsh/agc-sign`，同一把密钥复用同一张证书，不会重复占用 AGC 证书名额。
+
+## HTTP 接口（脚本 / 非 agent 场景用：POST + JSON；GET 见标注）
 | 动作 | 请求 | 说明 |
 |---|---|---|
 | 执行命令 | `POST /exec {"cmd":"getprop ro.product.model","timeoutMs":25000}` | 返回 `{"ok":true,"output":"$ cmd\n结果\n[exit 0]"}` |
 | 截图 | `POST /screenshot {}` | 返回 `{"ok":true,"path":"/tmp/xxx.png","bytes":N,"mime":"image/png"}`（鸿蒙 JPEG / 安卓 PNG） |
 | 推文件 | `POST /push {"path":"/data/local/tmp/x.bin","base64":"..."}` | 大文件可分片：再加 `index`+`chunkSize`（64KiB） |
 | 拉文件 | `POST /pull {"path":"/data/local/tmp/x.bin"}` | 返回 `{"ok":true,"bytes":N,"base64":"..."}` |
-| 安装 | `POST /install {"filename":"a.apk","base64":"...","replace":true}` | 安卓 `pm install` / 鸿蒙 `bm install`；base64 为包体 |
+| 安装 | `POST /install {"filename":"a.apk","base64":"...","replace":true}` | 安卓 `pm install` / 鸿蒙 `bm install`；base64 为包体（鸿蒙需已签名） |
+| 自动签名+安装 | `POST /agc/sign {"hapPath":"/abs/x.hap","bundle":"com.x","autoInstall":true}` | 也可用 `base64`+`filename` 代替 `hapPath`；返回 `{ok,sign:{signedPath,...},installed:{...}}` |
 | 卸载 | `POST /uninstall {"bundle":"com.xxx"}` | 安卓包名 / 鸿蒙 bundleName 均可 |
 | 切换活跃设备 | `POST /activate {"id":"hdc:3EV02..."}` | 命令默认打到 active 设备 |
 
@@ -80,39 +94,31 @@ curl -s -m 25 -X POST "$BASE/exec" -H 'content-type: application/json' \
 3. **降级要说明**：回落本机通道时，在回复里说明「插件未连接，改用本机 adb/hdc」。
 4. **不假装**：两条路都不通时如实说无法操作。
 
-## 两条通道（WebUSB / 本机 CLI）
-插件现在有两条**互不影响**的通道，按运行环境选：
+## 鸿蒙 HAP 自动签名（华为账号 → AGC → 本地签名）
 
-- **WebUSB 通道**（`/mbridge/exec|screenshot|push|pull|install|uninstall|activate`）
-  浏览器里有 `navigator.usb` 且通过 `requestDevice` 连了设备时用（Chrome/Edge 直接访问 DSH web）。
-- **本机 CLI 通道**（`/mbridge/cli/status|exec|screenshot|push|pull|install|uninstall|activate`）
-  宿主能探测到本机 adb/hdc 时用（**DSH 桌面端 Electron 首选**：绕开 WebUSB 限制和 WinUSB 驱动问题）。
-  探测：`GET /mbridge/cli/status` → `{available, adb, hdc, devices, activeId}`；
-  设备 id 形如 `cli:adb:<serial>` / `cli:hdc:<connectKey>`，用 `deviceId` 指定或用 active。
+一条命令跑完整链（需先扫码登录过，凭证在 `~/.dsh/agc-session.json`）：
 
-选通道顺序：
-1. 需要操作手机 → 先 `GET /mbridge/cli/status`，`available=true` 且有 devices → **走 CLI**（桌面端/本机最稳）
-2. 否则 `GET /mbridge/status`，`devices` 非空 → 走 WebUSB
-3. 两者都没有 → 让用户连接设备；都不可用就如实说无法操作
+```bash
+python3 /root/dsh-mobile-bridge/tools/agc_sign.py \
+  --hap 未签名.hap --bundle com.example.app --out signed.hap [--udid <UDID>] [--json]
+```
 
-## 鸿蒙 HAP 签名侧载（`no signature file` / code:9568320）
+它做的事：`jwToken/check` 换 accessToken → team-list → device/list(注意 start 从 1 起) →
+device/add(报 repeat 即已存在) → 本地 `hap-sign-tool generate-keypair/generate-csr` →
+cert/add（certName 必须带当前 p12 哈希后缀）→ `objects/url/reapply` 下载 .cer →
+provision/add（deviceList 用**云端 deviceId**，不是 64 位 UDID；provisionName 带 certId）→
+下载 .p7b → `hap-sign-tool sign-app`。
 
-**未签名 HAP 会被设备拒绝（`no signature file`），不要直接 `bm install` 未签名 HAP。** 插件内置了 AGC 登录与签名能力，流程：
+**坑（都实测过）：**
+- AGC 请求头：`{uid, teamId, oauth2Token:<accessToken>, source:"cli", lang:"zh-CN"}`；`oauth2Token` 不是 JWT
+- `generate-csr` 必须给 `-keystorePwd`，只给 `-keyPwd` 会报 keystore password incorrect
+- 密钥口令要落盘复用，否则新 p12 与旧证书不配套 → `Certificates error`
+- 复用账号里同名 `auto_debug_<teamId>.cer` 会拿到别人密钥的证书 → 必须用带 p12 哈希的名字
+- provisionName 必须带 certId，否则 AGC 按名去重返回旧 profile
+- 签名校验：`java -jar hap-sign-tool.jar verify-app -inFile x.hap -outCertChain c.cer -outProfile p.p7b`
+- 装机：`POST /mbridge/install` `{filename, base64, replace:true}`，成功输出 `install bundle successfully.`
 
-1. **登录华为账号**（插件内置，无需浏览器扩展）：
-   - `POST /mbridge/agc/login/start` → 返回登录二维码
-   - `GET /mbridge/agc/login/status` 轮询直到扫码成功
-   - 或 `POST /mbridge/agc/login/password {account,password}`（有滑块验证码时改走扫码）
-2. **申请调试证书 + Profile**（AGC 网页，插件通过 `/mbridge/agc/act` 驱动页面操作）
-3. **签名 HAP**（AGC 页面操作，产物用 `GET /mbridge/agc/hap` 下载）
-4. **安装**：
-   - 本机 CLI：`POST /mbridge/cli/install {base64, filename}`
-   - 或 WebUSB：`POST /mbridge/install`
-   - 底层是 `hdc install` / `bm install`
-
-> 该流程依赖 AGC 网页自动化（`/mbridge/agc/*` 是给设置页面板用的）。agent 若无法驱动网页，应引导用户在 **设置 → 移动设备 → 华为账号** 完成登录/签名，不要自行编造签名步骤。
-
-## 常见错误
-- `no signature file` / `code:9568320` → HAP 未签名，走上面的签名流程（或让用户在面板里签名）
-- `浏览器没有报告已连接设备` → 设备没连，先在设置页点「连接设备」
-- `Unable to claim interface` → 关掉其它 DSH 标签页 / 本机 hdc.exe、DevEco、华为助手
+## 多标签页抖动（重要）
+宿主把任务下发给「正在轮询的那个标签页」。如果用户开了多个 DSH 标签页，可能被**没有设备会话的那个**抢答，
+表现为 `浏览器端尚未连接设备（请在设置页点「连接设备」）` —— 但 `/status` 明明 `device` 有值。
+处置：**同一个请求重试 2~3 次**通常就成功；长期解法是让用户只保留一个 DSH 标签页。不要据此判定设备掉了。

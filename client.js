@@ -7630,6 +7630,41 @@ async function agcClearSession() {
   agcPollTimer = null;
 }
 
+/** 给未签名 HAP 走「AGC 申请证书/Profile + 本地签名」，签完自动装到当前设备 */
+async function agcSignInstall(file) {
+  const bundle = String((STATE.sign && STATE.sign.bundle) || '').trim();
+  if (!bundle) {
+    STATE.sign = { ...(STATE.sign || {}), busy: false, ok: false, msg: '先在输入框填包名 bundleName（如 com.example.app）' };
+    if (STATE.notify) { STATE.notify(); }
+    return;
+  }
+  STATE.sign = { ...(STATE.sign || {}), busy: true, ok: true, msg: `正在签名 ${file.name}（首次要申请证书/Profile，约 20~40 秒）…` };
+  if (STATE.notify) { STATE.notify(); }
+  try {
+    const u8 = new Uint8Array(await file.arrayBuffer());
+    let bin = '';
+    const CH = 0x8000;
+    for (let i = 0; i < u8.length; i += CH) { bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH)); }
+    const b64 = btoa(bin);
+    const r = await fetch(AGC_API + '/sign', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ filename: file.name, base64: b64, bundle, autoInstall: true }),
+    });
+    const d = await r.json();
+    const info = d.sign || {};
+    if (!d.ok) { throw new Error(info.error || d.error || '签名失败'); }
+    let msg = '✅ 签名成功\n输出：' + (info.signedPath || '') + '\n证书：' + (info.certName || '-');
+    if (d.installed) {
+      msg += '\n安装：' + (d.installed.ok ? (d.installed.output || 'ok') : ('失败 ' + (d.installed.error || '')));
+    }
+    STATE.sign = { ...STATE.sign, busy: false, ok: true, msg };
+  } catch (e) {
+    STATE.sign = { ...STATE.sign, busy: false, ok: false, msg: '签名失败：' + String(e && e.message ? e.message : e) };
+  } finally {
+    if (STATE.notify) { STATE.notify(); }
+  }
+}
+
 /** 把 HDC 日志送到宿主写文件，便于直接读取而不必截屏。 */
 async function flushHdcLog() {
   const conn = STATE.connection;
@@ -8283,6 +8318,32 @@ function buildHuaweiAccountPanel(t) {
           t('agcFailed') + (agc.message ? '：' + agc.message : ''))
       : null,
   ));
+
+  if (agc.state === 'success') {
+    const sg = STATE.sign || {};
+    out.push(h('div', { key: 'acc-sign', className: 'mb-card', style: { marginTop: '10px' } },
+      h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, '给 HAP 自动签名并安装'),
+      h('div', { className: 'mb-note', style: { lineHeight: 1.7 } },
+        '选一个未签名的 .hap：插件用它向 AGC 申请调试证书/Profile，本地签名后自动装到当前设备。'),
+      h('div', { className: 'mb-row', style: { marginTop: '8px', gap: '8px', flexWrap: 'wrap' } },
+        h('input', {
+          className: 'mb-input', placeholder: '包名 bundleName，如 com.example.app',
+          value: sg.bundle || '', spellCheck: false,
+          onChange: (ev) => { STATE.sign = { ...(STATE.sign || {}), bundle: ev.target.value }; },
+          style: { flex: '1 1 220px' },
+        }),
+        h('input', {
+          type: 'file', accept: '.hap', disabled: !!sg.busy,
+          onChange: (ev) => { const f = ev.target.files && ev.target.files[0]; if (f) { agcSignInstall(f); } },
+        }),
+      ),
+      sg.busy ? h('div', { className: 'mb-note', style: { marginTop: '8px' } }, sg.msg || '签名中…') : null,
+      (!sg.busy && sg.msg) ? h('div', {
+        className: sg.ok ? 'mb-note' : 'mb-err',
+        style: { marginTop: '8px', whiteSpace: 'pre-wrap' },
+      }, sg.msg) : null,
+    ));
+  }
 
   out.push(h('div', { key: 'acc-p', className: 'mb-card' },
     h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, t('accountPersistTitle')),
