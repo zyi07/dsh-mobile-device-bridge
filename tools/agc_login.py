@@ -123,12 +123,20 @@ class LoginSession:
         self.mode = mode
         from playwright.async_api import async_playwright
         if self.browser:
-            await self.close()
-        self.pw = await async_playwright().start()
-        self.browser = await self.pw.chromium.launch(
-            executable_path=CHROME, headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
+            # 复用已启动的浏览器（只换 context），省掉每次 3~5 秒的冷启动
+            try:
+                if self.ctx:
+                    await self.ctx.close()
+            except Exception:
+                pass
+            self.ctx = None
+            self.page = None
+        else:
+            self.pw = await async_playwright().start()
+            self.browser = await self.pw.chromium.launch(
+                executable_path=CHROME, headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
         # 复用已保存的登录态（cookie + localStorage），否则每次都要重新扫码
         _state = COOKIE_FILE if os.path.exists(COOKIE_FILE) else None
         self.ctx = await self.browser.new_context(
@@ -651,7 +659,7 @@ class LoginSession:
                 self.message = f"二维码还没渲染好（第 {attempt} 次），稍候…"
             except Exception as e:
                 self.message = f"截图失败（第 {attempt} 次）: {str(e)[:100]}"
-            await self.page.wait_for_timeout(1200)
+            await self.page.wait_for_timeout(350)
         # 抓不到就把当时的整页截图落盘，方便排查（不然只能猜）
         if last_full:
             try:
@@ -674,10 +682,10 @@ class LoginSession:
         所以必须在一个循环里反复试：看到确认页就点「允许」，看到二维码就截，
         拿到 tempToken 就结束。这样才不会被中间态卡住。
         """
-        for _ in range(25):
+        for _ in range(60):
             if self.temp_token:
                 return "token"
-            await self.page.wait_for_timeout(1000)
+            await self.page.wait_for_timeout(300)
             try:
                 body = await self._page_text()
             except Exception:
@@ -686,10 +694,10 @@ class LoginSession:
                 self.message = "华为帐号已登录，正在完成授权…"
                 if await self._click_allow():
                     self.message = "已点「允许」，正在取凭证…"
-                    for _ in range(15):
+                    for _ in range(25):
                         if self.temp_token:
                             return "token"
-                        await self.page.wait_for_timeout(600)
+                        await self.page.wait_for_timeout(300)
                     # 授权后通常会跳到 127.0.0.1 回调页
                     if "127.0.0.1" in (self.page.url or ""):
                         return "token"
@@ -755,7 +763,7 @@ class LoginSession:
     async def ticker(self):
         """后台定时检查：自动刷新二维码、检测扫码/过期，不依赖前端轮询"""
         while True:
-            await asyncio.sleep(12)
+            await asyncio.sleep(2)
             try:
                 if self.state == "waiting":
                     await self.poll()

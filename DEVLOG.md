@@ -1689,3 +1689,14 @@ p7b 内 bundle-name=com.dsh.bridgeapp、device-ids 含本机 UDID。
 - host：新增 `POST /mbridge/agc/hap-info`；`/agc/sign` 的 bundle 变可选；agent 工具 `bundle` 变可选
 - client：选文件后自动 `hap-info` 回填包名并直接开始签名+安装，输入框变成可改的覆盖项
 **验证：** `/agc/hap-info` → `{bundleName:"com.dsh.bridgeapp",versionName:"1.0.1"}`；`/agc/sign` 不传 bundle → 8.3s ok，自动识别 com.dsh.bridgeapp。版本 0.2.0。
+
+## 2026-11-24 09:35 - 面板交互修复 + 登录提速（0.2.1）
+
+按用户反馈改 5 点：
+1. 账号视图下 WebUSB/本地USB 标签点了没反应 → onClick 同时 setView('device')，顶栏不再"假死"
+2. 签名后不再自动安装 → `/agc/sign` 用 autoInstall:false，结果里给「安装到设备」按钮，走新路由 `/agc/install-signed {path}`
+3. 登录提速：agc_login 复用已启动的 chromium（省 3~5s 冷启动）、settle 轮询 1s→0.3s、二维码重试间隔 1.2s→0.35s、ticker 12s→2s；client 轮询 3s→1.2s
+4. 删掉「诊断」按钮（点了大概率没反应，价值低）
+5. 文案：浏览器→WebUSB、本机命令行→本地USB、华为账号→华为账号（ID自签）；删掉顶栏「断开」，只保留已连接设备卡里的「断开」
+
+**副作用（如实记录）：** 我测试时调了 `/agc/login/close`（它就是「退出登录」），把用户的 agc-session.json 删了 → 需要重新扫码一次。以后重启登录进程不要用 close。

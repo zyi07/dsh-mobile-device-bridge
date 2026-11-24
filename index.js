@@ -682,6 +682,34 @@ export function apply(ctx) {
             return;
           }
 
+          // 安装一个已经签好的本地 HAP（配合 /agc/sign 两步式：先签名，用户点「安装到设备」再走这里）
+          if (path === ROUTE_PREFIX + '/agc/install-signed' && req.method === 'POST') {
+            const body = await readBody(req, 4096);
+            const p = String(body.path || '').trim();
+            if (!p) { send(res, 400, { ok: false, error: '缺少 path' }); return; }
+            const fs = await import('node:fs/promises');
+            try {
+              const buf = await fs.readFile(p);
+              if (device || devices.length) {
+                const r = await enqueue('install', {
+                  filename: nodePath.basename(p),
+                  base64: buf.toString('base64'),
+                  replace: body.replace !== false,
+                }, 300000);
+                send(res, 200, { ok: true, output: r.output || 'ok' });
+              } else {
+                const tools = await cliChannel.detectTools();
+                const list = await cliChannel.listDevices(tools);
+                if (!list.length) { send(res, 200, { ok: false, error: '当前没有连接设备' }); return; }
+                const out = await cliChannel.install(tools, list[0], buf, nodePath.basename(p), true);
+                send(res, 200, { ok: true, output: String(out) });
+              }
+            } catch (e) {
+              send(res, 500, { ok: false, error: String(e && e.message ? e.message : e) });
+            }
+            return;
+          }
+
           // 自动签名（AGC 申请证书/Profile + 本地 hap-sign-tool），可选直接安装
           if (path === ROUTE_PREFIX + '/agc/sign' && req.method === 'POST') {
             const body = await readBody(req, 256 << 20);

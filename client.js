@@ -7593,7 +7593,7 @@ function startAgcPolling() {
         qrLeft: d.qrLeft,
       };
     } catch { /* 忽略单次失败 */ }
-  }, 3000);
+  }, 1200);
 }
 
 /** 从宿主读取已保存的登录态（插件重载/切页后自动恢复，不需要重新登录） */
@@ -7671,18 +7671,37 @@ async function agcSignInstall(file) {
   try {
     const r = await fetch(AGC_API + '/sign', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ filename: file.name, base64: b64, bundle, autoInstall: true }),
+      body: JSON.stringify({ filename: file.name, base64: b64, bundle, autoInstall: false }),
     });
     const d = await r.json();
     const info = d.sign || {};
     if (!d.ok) { throw new Error(info.error || d.error || '签名失败'); }
-    let msg = '✅ 签名成功\n包名：' + (info.bundle || bundle) + '\n输出：' + (info.signedPath || '') + '\n证书：' + (info.certName || '-');
-    if (d.installed) {
-      msg += '\n安装：' + (d.installed.ok ? (d.installed.output || 'ok') : ('失败 ' + (d.installed.error || '')));
-    }
-    STATE.sign = { ...STATE.sign, busy: false, ok: true, msg };
+    const msg = '✅ 签名成功\n包名：' + (info.bundle || bundle) + '\n输出：' + (info.signedPath || '') + '\n证书：' + (info.certName || '-') + '\n点「安装到设备」装到当前手机';
+    STATE.sign = { ...STATE.sign, busy: false, ok: true, msg, signedPath: info.signedPath || '', installedAt: 0 };
   } catch (e) {
     STATE.sign = { ...STATE.sign, busy: false, ok: false, msg: '签名失败：' + String(e && e.message ? e.message : e) };
+  } finally {
+    if (STATE.notify) { STATE.notify(); }
+  }
+}
+
+/** 把刚签好的包装到设备（用户点「安装到设备」才执行） */
+async function agcInstallSigned() {
+  const signedPath = (STATE.sign && STATE.sign.signedPath) || '';
+  if (!signedPath) { return; }
+  STATE.sign = { ...(STATE.sign || {}), busy: true, msg: '正在安装到设备…' };
+  if (STATE.notify) { STATE.notify(); }
+  try {
+    const r = await fetch(AGC_API + '/install-signed', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: signedPath }),
+    });
+    const d = await r.json();
+    if (!d.ok) { throw new Error(d.error || '安装失败'); }
+    STATE.sign = { ...STATE.sign, busy: false, ok: true, installedAt: Date.now(),
+      msg: (STATE.sign.msg || '') + '\n安装：' + (d.output || 'ok') };
+  } catch (e) {
+    STATE.sign = { ...STATE.sign, busy: false, msg: (STATE.sign.msg || '') + '\n安装失败：' + String(e && e.message ? e.message : e) };
   } finally {
     if (STATE.notify) { STATE.notify(); }
   }
@@ -8365,6 +8384,9 @@ function buildHuaweiAccountPanel(t) {
         className: sg.ok ? 'mb-note' : 'mb-err',
         style: { marginTop: '8px', whiteSpace: 'pre-wrap' },
       }, sg.msg) : null,
+      (sg.signedPath && !sg.installedAt && !sg.busy) ? h('button', {
+        className: 'mb-btn mb-btn--primary', style: { marginTop: '8px' }, onClick: agcInstallSigned,
+      }, '安装到设备') : null,
     ));
   }
 
@@ -8684,12 +8706,12 @@ function MobileBridgeSection(props) {
       h('button', {
         key: 'chweb',
         className: 'mb-btn' + (channel === 'web' ? ' mb-btn--primary' : ''),
-        onClick: () => setChannel('web'),
+        onClick: () => { setView('device'); setChannel('web'); },
       }, t('chWeb')),
       h('button', {
         key: 'chcli',
         className: 'mb-btn' + (channel === 'cli' ? ' mb-btn--primary' : ''),
-        onClick: () => { setChannel('cli'); if (!cliDevices.length) { cliRefresh(); } },
+        onClick: () => { setView('device'); setChannel('cli'); if (!cliDevices.length) { cliRefresh(); } },
       }, t('chCli')),
       h('button', {
         key: 'kacc',
@@ -8698,28 +8720,11 @@ function MobileBridgeSection(props) {
       }, t('navAccount') + (STATE.agc && STATE.agc.state === 'success' ? ' ✓' : '')),
 
       view === 'account' ? null : h('button', {
-        key: 'diag',
-        className: 'mb-btn',
-        onClick: async () => {
-          setError('');
-          try {
-            await dumpUsbState('诊断按钮');
-            const d = await diagnoseUsb();
-            appendToLog('USB 诊断：\n' + JSON.stringify(d, null, 2));
-          } catch (e) {
-            setError(String(e && e.message ? e.message : e));
-          }
-        },
-      }, t('diagnose')),
-      view === 'account' ? null : h('button', {
         key: 'c',
         className: 'mb-btn mb-btn--primary',
         disabled: phase === 'connecting' || !usbSupported,
         onClick: connect,
       }, phase === 'connecting' ? t('connecting') : t('connect')),
-      view === 'account' ? null : (phase === 'connected'
-        ? h('button', { key: 'd', className: 'mb-btn', onClick: disconnect }, t('disconnect'))
-        : null),
       view === 'account' ? null : h('span', { key: 'b', className: 'mb-badge' }, phaseLabel),
       h('span', { key: 'build', className: 'mb-badge' }, BUILD_TAG),
     ),
@@ -8935,13 +8940,13 @@ function apply(ctx) {
       diagnose: '诊断',
       hintAdb: '连接会跟着页面保留：关掉设置、切到别页再回来都不用重连；刷新页面则会断开，之后会自动尝试恢复。需要在手机上开启「USB 调试」，首次连接时手机会弹出授权提示。同一时刻只能有一个程序占用 USB，请先停掉本机的 adb server、Android Studio、scrcpy 等。',
       hintHdc: '连接会跟着页面保留：关掉设置、切到别页再回来都不用重连；刷新页面则会断开。需要在手机上开启「USB 调试」，并且本机不能有 hdc / DevEco Studio 正在占用设备（连接前先执行 hdc kill）。首次连接需要在手机上点「允许 / 始终信任」；之后同一把密钥不会再询问。连接建立后才可用命令与截图。',
-      navAccount: '华为账号',
+      navAccount: '华为账号（ID自签）',
       devicesTitle: '已连接设备',
       sysVersion: '系统版本',
       deviceLog: '设备日志',
       fullLog: '完整日志（开发者）',
-      chWeb: '浏览器',
-      chCli: '本机命令行',
+      chWeb: 'WebUSB',
+      chCli: '本地USB',
       cliRefresh: '刷新本机设备',
       cliNotFound: '未找到 adb/hdc（装 DevEco / Platform-Tools，或确认在 PATH）',
       cliNoDev: '（没有可用设备：插好手机、开启 USB 调试，确认命令行能看到）',
@@ -9016,13 +9021,13 @@ function apply(ctx) {
       diagnose: 'Diagnose',
       hintAdb: 'The connection survives closing settings or switching pages; reloading the page drops it and it will try to reconnect. Enable USB debugging on the phone and confirm the authorization prompt on first connect. Only one program may hold the USB device, so stop the adb server, Android Studio and scrcpy first.',
       hintHdc: 'The connection survives closing settings or switching pages; reloading drops it. Enable USB debugging on the phone and make sure no hdc / DevEco Studio is holding the device (run hdc kill first). On first connect tap Allow / Always trust on the phone; the saved key is not asked for again. Commands and screenshots work once connected.',
-      navAccount: 'Huawei account',
+      navAccount: 'Huawei ID (self-sign)',
       devicesTitle: 'Connected devices',
       sysVersion: 'OS version',
       deviceLog: 'Device log',
       fullLog: 'Full log (developer)',
-      chWeb: 'Browser',
-      chCli: 'Local CLI',
+      chWeb: 'WebUSB',
+      chCli: 'Local USB',
       cliRefresh: 'Refresh local devices',
       cliNotFound: 'adb/hdc not found (install DevEco / Platform-Tools or ensure on PATH)',
       cliNoDev: '(no device: plug in phone, enable USB debugging, ensure the CLI sees it)',
