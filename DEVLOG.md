@@ -1719,3 +1719,9 @@ p7b 内 bundle-name=com.dsh.bridgeapp、device-ids 含本机 UDID。
 - 设备信息/命令/日志整块改为 `info && phase === 'connected'` 才渲染
 - 看门狗移除会话后 `setInfo(STATE.info || null)`
 - 未连接时显示一句「未连接设备：插好数据线后点上方「连接设备」」
+
+## 2026-11-24 13:50 - 发布 0.2.3 到 npm
+
+`npm publish` → `dsh-mobile-device-bridge@0.2.3`（10.4 MB，18 files，latest）。
+README 补：ID 自签完整流程、agent 工具清单、多标签页/拔线两条常见问题；package.json 补 repository/homepage/bugs。
+git tag `v0.2.3` 已推。
