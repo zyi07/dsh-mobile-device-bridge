@@ -66,5 +66,13 @@
     "harmonyos",
     "hdc",
     "webusb"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zyi07/dsh-mobile-device-bridge.git"
+  },
+  "homepage": "https://github.com/zyi07/dsh-mobile-device-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/zyi07/dsh-mobile-device-bridge/issues"
+  }
 }
