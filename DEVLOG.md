@@ -1710,3 +1710,12 @@ p7b 内 bundle-name=com.dsh.bridgeapp、device-ids 含本机 UDID。
   序列号不在授权列表里的会话自动 `removeSession` → 上报空设备
 - host `DEVICE_STICKY_MS` 15000 → 6000（抖动容忍还在，但拔线反映更快）
 **说明：** 刷新页面也会立即清空（会话只在内存里）。
+
+## 2026-11-24 12:50 - 拔线后不再残留设备信息/命令/日志
+
+**问题：** 状态角标已经变「未连接」，但机型/系统/序列号卡片、命令输入框、设备日志还留着。
+**根因：** 渲染条件是 `if (info)`，而 `info` 是 React state，看门狗只 setPhase('idle')、没同步 setInfo。
+**改动（0.2.3）：**
+- 设备信息/命令/日志整块改为 `info && phase === 'connected'` 才渲染
+- 看门狗移除会话后 `setInfo(STATE.info || null)`
+- 未连接时显示一句「未连接设备：插好数据线后点上方「连接设备」」

@@ -1325,6 +1325,7 @@ function MobileBridgeSection(props) {
       });
       for (const s of gone) { try { await removeSession(s.id); } catch { /* ignore */ } }
       if (STATE.sessions.length !== before) {
+        setInfo(STATE.info || null);
         setPhase(STATE.sessions.length ? 'connected' : 'idle');
         if (STATE.notify) { STATE.notify(); }
       }
@@ -1721,6 +1722,11 @@ function MobileBridgeSection(props) {
     children.push(h('div', { key: 'nu', className: 'mb-note' }, t('noWebusb')));
   }
 
+  if (channel === 'web' && phase !== 'connected' && !(STATE.sessions && STATE.sessions.length)) {
+    children.push(h('div', { key: 'nc-hint', className: 'mb-note' },
+      '未连接设备：插好数据线后点上方「连接设备」。'));
+  }
+
   if (error) {
     children.push(h('div', { key: 'e', className: 'mb-err' }, error));
   }
@@ -1740,7 +1746,7 @@ function MobileBridgeSection(props) {
     children.push(h('pre', { key: 'live', className: 'mb-out' }, tail));
   }
 
-  if (info) {
+  if (info && phase === 'connected') {
     children.push(h('div', { key: 'i', className: 'mb-card' },
       h('div', { className: 'mb-kv' },
         h('span', { className: 'mb-k' }, t('model')),
