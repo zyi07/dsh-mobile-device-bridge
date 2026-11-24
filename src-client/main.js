@@ -1309,7 +1309,34 @@ function MobileBridgeSection(props) {
     const id = setInterval(() => setTick((n) => n + 1), 2000);
     STATE.notify = () => setTick((n) => n + 1);
     agcRestoreSession();      // 打开设置页就把已保存的华为登录态读回来
-    return () => { clearInterval(id); if (STATE.notify) { STATE.notify = null; } };
+
+    // 物理拔掉设备后要能反映到面板：WebUSB disconnect + 每 4 秒兜底核对授权列表。
+    // （以前只在连接/断开按钮里改状态，线拔了 STATE.sessions 还在，面板就一直显示已连接）
+    const dropGone = async () => {
+      if (!STATE.sessions || !STATE.sessions.length) { return; }
+      let list = null;
+      try { list = await navigator.usb.getDevices(); } catch { return; }
+      const alive = new Set((list || []).map((d) => d.serialNumber || ''));
+      const before = STATE.sessions.length;
+      const gone = STATE.sessions.filter((s) => {
+        const ser = s.info && s.info.serial;
+        if (!ser) { return false; }
+        return !alive.has(ser);
+      });
+      for (const s of gone) { try { await removeSession(s.id); } catch { /* ignore */ } }
+      if (STATE.sessions.length !== before) {
+        setPhase(STATE.sessions.length ? 'connected' : 'idle');
+        if (STATE.notify) { STATE.notify(); }
+      }
+    };
+    const onDisc = () => { dropGone(); };
+    try { if (navigator.usb) { navigator.usb.addEventListener('disconnect', onDisc); } } catch { /* ignore */ }
+    const id2 = setInterval(dropGone, 4000);
+    return () => {
+      clearInterval(id); clearInterval(id2);
+      try { if (navigator.usb) { navigator.usb.removeEventListener('disconnect', onDisc); } } catch { /* ignore */ }
+      if (STATE.notify) { STATE.notify = null; }
+    };
   }, []);
 
   // 页面卸载时尽力关闭 USB 设备，避免句柄悬挂在浏览器进程里（下次连接会 Access denied）

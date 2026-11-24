@@ -41,7 +41,7 @@ export function apply(ctx) {
   let devices = [];
   // 设备状态粘性：浏览器在重连/心跳抖动期间会短暂上报 device:null，
   // 不能一收到 null 就清空，否则 status 抖动、exec 在 null 命中的瞬间直接失败。
-  const DEVICE_STICKY_MS = 15000;
+  const DEVICE_STICKY_MS = 6000;
   let lastDeviceAt = 0;
   let browserState = null;
   let browserError = null;

@@ -1700,3 +1700,13 @@ p7b 内 bundle-name=com.dsh.bridgeapp、device-ids 含本机 UDID。
 5. 文案：浏览器→WebUSB、本机命令行→本地USB、华为账号→华为账号（ID自签）；删掉顶栏「断开」，只保留已连接设备卡里的「断开」
 
 **副作用（如实记录）：** 我测试时调了 `/agc/login/close`（它就是「退出登录」），把用户的 agc-session.json 删了 → 需要重新扫码一次。以后重启登录进程不要用 close。
+
+## 2026-11-24 10:05 - 修「设备拔了面板还显示已连接」
+
+**根因：** 面板的已连接来自浏览器内存里的 `STATE.sessions`，只有点「断开」才会移除；
+物理拔线不会改它（没有监听 WebUSB 的 disconnect 事件），于是 host 一直收到 device=list。
+**改动（0.2.2）：**
+- client 挂载时注册 `navigator.usb.addEventListener('disconnect', ...)`，并每 4 秒用 `getDevices()` 兜底核对，
+  序列号不在授权列表里的会话自动 `removeSession` → 上报空设备
+- host `DEVICE_STICKY_MS` 15000 → 6000（抖动容忍还在，但拔线反映更快）
+**说明：** 刷新页面也会立即清空（会话只在内存里）。
