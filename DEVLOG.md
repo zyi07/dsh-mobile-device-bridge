@@ -1651,3 +1651,15 @@ provision/add(deviceList 用云端 deviceId，不是 64 位 UDID) → 下载 .p7
 `hap-sign-tool verify-app` → `Digest verify result: true` / `verify permission sign success` / `verify-app success`。
 p7b 内 bundle-name=com.dsh.bridgeapp、device-ids 含本机 UDID。
 **未验证：** 装到手机 —— 传输时浏览器 WebUSB 掉线（devAge 336s），install 报「浏览器没有报告已连接设备」。
+
+## 2026-11-24 08:42 - 自动签名 + 装机全链路真机验证通过（闭环）
+
+**结果：** 用 2026-11-23 签出的 `/tmp/mini_signed.hap`（com.dsh.bridgeapp）装到 PLA-AL10：
+`POST /mbridge/install` → 5.2s → `install bundle successfully.`
+`bm dump -n com.dsh.bridgeapp` → 返回 appId/appIdentifier，确认已安装。
+
+至此「华为账号 → AGC 申请证书/Profile（绑本机 UDID）→ 本地 hap-sign-tool 签名 → hdc 装进手机」整条链闭环。
+
+**遗留：**
+- 这套能力目前只有命令行 `tools/agc_sign.py`，面板里还没有按钮（加按钮要改 host 路由，需重启宿主）
+- 多标签页时 runJob 会被“没有设备会话的那个标签页”抢答，报「浏览器端尚未连接设备」；重试或只留一个 DSH 标签页可解
