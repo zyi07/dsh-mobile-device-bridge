@@ -120,6 +120,12 @@ export function apply(ctx) {
 
   /** 跑 tools/agc_sign.py：AGC 申请证书/Profile + 本地签名。返回解析后的结果对象 */
   async function signHapFile({ hapPath, bundle, udid }) {
+    try {
+      const fsMod = await import('node:fs/promises');
+      await fsMod.access(hapPath);
+    } catch {
+      return { ok: false, error: 'HAP 文件不存在：' + hapPath, signedPath: '' };
+    }
     const here = nodePath.dirname(nodeFileURLToPath(import.meta.url));
     const script = nodePath.join(here, 'tools', 'agc_sign.py');
     const outPath = nodePath.join(nodePath.dirname(hapPath),
@@ -138,12 +144,12 @@ export function apply(ctx) {
     });
     const last = (res.out || '').trim().split('\n').filter(Boolean).pop() || '';
     let info = null;
-    try { info = JSON.parse(last); } catch { info = { ok: false, error: '签名输出无法解析: ' + last.slice(0, 400) }; }
-    if (!info || !info.ok) {
-      info = Object.assign({}, info || {}, {
-        ok: false,
-        error: (info && info.error) || (res.err || '').slice(-700) || '签名失败',
-      });
+    try { info = JSON.parse(last); } catch { info = null; }
+    if (!info) {
+      const tail = (res.err || res.out || '').trim().split('\n').filter(Boolean).slice(-4).join(' ').slice(0, 500);
+      info = { ok: false, error: '签名脚本没有返回结果 (exit ' + res.code + ')' + (tail ? '：' + tail : '') };
+    } else if (!info.ok) {
+      info.error = info.error || (res.err || '').slice(-700) || '签名失败';
     }
     info.signedPath = outPath;
     return info;
@@ -199,12 +205,12 @@ export function apply(ctx) {
           return { mode: 'cli', tools, dev };
         }
         if (device || devices.length) { return { mode: 'browser' }; }
-        throw new Error('没有可用手机：本机没有 adb/hdc 设备，浏览器也没有连接设备。请让用户在设置页「移动设备」连接。');
+        throw new Error('没有可用手机：本机没有 adb/hdc 设备，浏览器也没有连接设备。请让用户在 DSH 设置 →「移动设备」点「连接设备」；若已连上仍报错，多半是多标签页抢答，重试 2~3 次即可（不要改用 curl 绕过，同一条通道）。');
       };
 
       toolsCtx.tools.register(defineTool({
         name: 'mobile_bridge_devices',
-        description: 'List phones available to the dsh-mobile-device-bridge plugin: local adb/hdc CLI devices and devices connected in the browser over WebUSB.',
+        description: 'List phones available to the dsh-mobile-device-bridge plugin (local adb/hdc CLI + browser WebUSB). CALL THIS FIRST for any phone/adb/hdc/HAP task. The same plugin exposes mobile_bridge_exec / mobile_bridge_screenshot / mobile_bridge_install / mobile_bridge_sign_install — prefer them over running adb, hdc, curl or any local signer script.',
         parameters: {},
         output: { schema: strSchema, render: textOut },
         async execute() {
@@ -221,7 +227,7 @@ export function apply(ctx) {
 
       toolsCtx.tools.register(defineTool({
         name: 'mobile_bridge_exec',
-        description: 'Run a shell command on a connected Android or HarmonyOS phone through the dsh-mobile-device-bridge plugin (local adb/hdc CLI first, else the browser WebUSB session).',
+        description: 'Run a shell command on a connected Android or HarmonyOS phone. Use this instead of adb/hdc/curl: it works even when the phone is plugged into the user\'s computer rather than this machine (goes through the browser WebUSB session), and falls back to local adb/hdc when available.',
         parameters: {
           cmd: { type: 'string', required: true, description: 'Shell command, e.g. getprop ro.product.model or param get const.product.model.' },
           deviceId: { type: 'string', description: 'Optional device id from mobile_bridge_devices; defaults to the active device.' },
@@ -241,7 +247,7 @@ export function apply(ctx) {
 
       toolsCtx.tools.register(defineTool({
         name: 'mobile_bridge_screenshot',
-        description: 'Take a screenshot of a connected phone, save it to a local file and return that path (use read_image on it).',
+        description: 'Take a screenshot of a connected phone, save it to a local file and return that path — then call read_image on it to actually look. Prefer this over adb/hdc screencap.',
         parameters: {
           deviceId: { type: 'string', description: 'Optional device id; defaults to the active device.' },
         },
@@ -267,7 +273,7 @@ export function apply(ctx) {
 
       toolsCtx.tools.register(defineTool({
         name: 'mobile_bridge_install',
-        description: 'Install an APK (Android) or HAP (HarmonyOS) file on a connected phone. The HarmonyOS HAP must already be signed; use the prefer-mobile-bridge skill for signing.',
+        description: 'Install an APK (Android) or an already-signed HAP (HarmonyOS) on a connected phone. For an UNSIGNED HarmonyOS HAP use mobile_bridge_sign_install instead — it signs with the Huawei account first, no local signer script needed.',
         parameters: {
           file: { type: 'string', required: true, description: 'Absolute path to the local .apk/.hap file.' },
           deviceId: { type: 'string', description: 'Optional device id; defaults to the active device.' },
@@ -292,7 +298,7 @@ export function apply(ctx) {
 
       toolsCtx.tools.register(defineTool({
         name: 'mobile_bridge_sign_install',
-        description: 'Sign an unsigned HarmonyOS HAP with the logged-in Huawei account (AGC debug cert + profile are issued automatically) and optionally install it on a connected phone. The bundleName is read from the HAP automatically. Needs a prior QR login in the plugin panel.',
+        description: 'Sign an unsigned HarmonyOS HAP with the logged-in Huawei account (a debug cert and a device-bound provisioning profile are issued by AGC automatically) and install it on the connected phone. Use this instead of any local signing script. The bundleName is read from the HAP. Requires a prior QR login in DSH Settings → Mobile devices → 华为账号（ID自签）; if it reports not logged in, ask the user to scan the QR there.',
         parameters: {
           file: { type: 'string', required: true, description: 'Absolute path to the unsigned .hap.' },
           bundle: { type: 'string', description: 'Optional bundleName; when omitted it is read from the HAP module.json.' },
@@ -303,8 +309,22 @@ export function apply(ctx) {
         output: { schema: strSchema, render: textOut },
         async execute({ file, bundle, install, deviceId, udid }) {
           const fsMod = await import('node:fs/promises');
+          // 先确认扫过码，否则直接给可执行的提示，而不是甩一个 401 给 agent
+          try {
+            const raw = await fsMod.readFile(nodePath.join(nodeOs.homedir(), '.dsh', 'agc-session.json'), 'utf8');
+            const sess = JSON.parse(raw);
+            if (!sess || !sess.jwt) { throw new Error('no-jwt'); }
+          } catch {
+            return '未登录华为账号，无法签名：请让用户在 DSH 设置 →「移动设备」→「华为账号（ID自签）」点「登录」用手机扫码，然后再调用本工具。';
+          }
           const info = await signHapFile({ hapPath: String(file), bundle: bundle ? String(bundle) : '', udid });
-          if (!info.ok) { return '签名失败: ' + (info.error || ''); }
+          if (!info.ok) {
+            const e = String(info.error || '');
+            if (/401|jwToken|accessToken|token expired/i.test(e)) {
+              return '华为账号登录态已失效：请让用户在「华为账号（ID自签）」点「退出登录（清除本机凭证）」后重新扫码登录。原始错误：' + e.slice(0, 200);
+            }
+            return '签名失败: ' + e;
+          }
           const lines = [`签名成功: ${info.signedPath}（${info.bytes || '?'} 字节，证书 ${info.certName || '?'}）`];
           if (install === false) { return lines.join('\n'); }
           const buf = await fsMod.readFile(info.signedPath);

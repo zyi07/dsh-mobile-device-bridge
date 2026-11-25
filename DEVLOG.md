@@ -1725,3 +1725,17 @@ p7b 内 bundle-name=com.dsh.bridgeapp、device-ids 含本机 UDID。
 `npm publish` → `dsh-mobile-device-bridge@0.2.3`（10.4 MB，18 files，latest）。
 README 补：ID 自签完整流程、agent 工具清单、多标签页/拔线两条常见问题；package.json 补 repository/homepage/bugs。
 git tag `v0.2.3` 已推。
+
+## 2026-11-25 09:05 - 优化 agent 调用体验（0.2.5）
+
+现象：另一个 session 的 agent 做 OneNote 鸿蒙签名时没直接用插件工具，而是 shell 查 mbridge、curl 重试、
+甚至去找 /root/signer/（小白）的旧签名材料，还两次撞「浏览器端尚未连接设备」。
+
+改动：
+- 5 个 agent 工具描述全部重写：`mobile_bridge_devices` 明确 "CALL THIS FIRST" 并列全所有工具；
+  exec/screenshot/install 都写明「优先用它、别 shell 出 adb/hdc/curl」；install 指向 sign_install；sign_install 写明需扫码登录
+- `mobile_bridge_sign_install` 增加前置检查：没登录直接返回「请让用户扫码登录」，不再甩 401；登录失效时提示重新扫码
+- signHapFile：HAP 不存在直接报路径；脚本无输出时带 exit code + stderr 尾，不再返回空错误
+- pickDevice 无设备错误文案补充「重试 2~3 次（多标签页抢答），不要改用 curl」
+- skill `prefer-mobile-bridge` 重写：front-matter 触发词扩到 手机/安卓/鸿蒙/HAP/签名/侧载/AGP/真机调试；
+  正文顶部加「硬规则」5 条（先 devices、用工具不要 curl、装未签名 HAP 用 sign_install、报错先读文案、不假装）
