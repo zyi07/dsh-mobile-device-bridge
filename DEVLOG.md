@@ -1789,3 +1789,15 @@ git tag `v0.2.3` 已推。
 - 版本 0.2.8，`npm publish` 完成
 
 **遗留：** 历史提交里仍有旧 blob（示例包与明文标识），需要重写历史 + force-with-lease 才能彻底清除；npm 上 0.2.7 及更早版本的 tarball 里也含该示例包，需 unpublish 或由作者决定。
+
+## 2026-11-25 15:45 - 历史重写（隐私清除）与 npm 现状
+
+**GitHub：** 已用 `git filter-branch` 重写全部历史（删除 `assets/dsh_demo_signed.hap`、清掉所有 `__pycache__/*.pyc`、
+把序列号/UDID/teamId/账号名（含 hex 形式）替换为占位符），并用 `--force-with-lease` 强推 main 与 5 个 tag。
+从 GitHub 全新 clone 复验：`assets/` 不存在、HEAD 可达 2382 个对象里 0 命中泄漏串、`.git` 44MB → 12MB。
+本地仓库已切换为重写后的副本，旧仓库备份在 `/root/dsh-mobile-bridge.old-history`（确认无误后可删）。
+
+**npm：** 0.2.8 已是 latest（481KB，不含示例包）。
+`0.1.1 / 0.1.2 / 0.2.3 / 0.2.5 / 0.2.7`（各 ~10.8MB，含示例包）**已全部 deprecate**，
+但 `npm unpublish` 返回 403 —— automation token 没有 unpublish 权限（需要账号 2FA/OTP），
+需作者本人执行 5 条 unpublish 才能真正删掉 tarball。
