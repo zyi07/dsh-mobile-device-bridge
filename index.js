@@ -69,6 +69,41 @@ export function apply(ctx) {
   const now = () => Date.now();
   const browserAlive = () => now() - lastSeen < BROWSER_STALE_MS;
 
+  // ---- 多标签页：任务只能发给「自报持有设备」的那个页面 ----
+  // 以前任务队列是全局的，谁先来轮询就发给谁。用户开两个 DSH 标签页时，
+  // 连着设备的那个和没连的那个轮流取任务 → 一半请求成功一半失败（实测 6/12 严格交替），
+  // 表现为「设备连着，但间歇性报未连接」。现在按 tabId 记账，只发给 capable 的页面。
+  const pollers = new Map();          // tabId -> { capable, at, state }
+  const POLLER_STALE_MS = 20000;
+  function notePoller(tabId, capable, state) {
+    if (!tabId) { return; }
+    pollers.set(String(tabId), { capable: !!capable, at: now(), state: state || null });
+  }
+  function prunePollers() {
+    for (const [k, p] of pollers) {
+      if (now() - p.at > POLLER_STALE_MS * 3) { pollers.delete(k); }
+    }
+  }
+  function capablePollerAge() {
+    let best = null;
+    for (const p of pollers.values()) {
+      if (!p.capable) { continue; }
+      if (best === null || p.at > best) { best = p.at; }
+    }
+    return best === null ? null : now() - best;
+  }
+  function hasCapablePoller() {
+    const age = capablePollerAge();
+    return age !== null && age < POLLER_STALE_MS;
+  }
+  function pollerSummary() {
+    const out = [];
+    for (const [k, p] of pollers) {
+      out.push({ tab: String(k).slice(0, 8), capable: p.capable, ageMs: now() - p.at, state: p.state });
+    }
+    return out.sort((a, b) => a.ageMs - b.ageMs);
+  }
+
   // ---- 华为账号扫码登录（宿主侧起真实浏览器，插件里显示二维码）----
   let agcLoginProc = null;
   let agcLoginBuf = "";
@@ -165,8 +200,19 @@ export function apply(ctx) {
         reject(new Error(`超时 ${timeoutMs}ms：浏览器没有在时限内回传结果（页面是否还开着？）`));
       }, timeoutMs);
       if (timer.unref) timer.unref();
-      jobs.set(id, { resolve, reject, timer });
+      jobs.set(id, { resolve, reject, timer, kind, data, attempt: 0, tabId: null });
       queue.push({ id, kind, data });
+      // 没有任何标签页持有设备 → 别让调用方干等 90 秒
+      const probe = setTimeout(() => {
+        if (jobs.has(id) && !hasCapablePoller()) {
+          const at = queue.findIndex((j) => j.id === id);
+          if (at !== -1) { queue.splice(at, 1); }
+          jobs.delete(id);
+          clearTimeout(timer);
+          reject(new Error('当前没有任何标签页持有设备（多半是开着多个 DSH 页面，请求被分到了没连设备的那个）：请只保留连着设备的那一个标签页再试。'));
+        }
+      }, 4000);
+      if (probe.unref) { probe.unref(); }
     });
   }
 
@@ -402,6 +448,8 @@ export function apply(ctx) {
               deviceStickyMs: DEVICE_STICKY_MS,
               browserState,
               browserError,
+              tabs: pollerSummary(),
+              capablePollerAgeMs: capablePollerAge(),
               queued: queue.length,
               inflight: jobs.size,
               diag,
@@ -419,6 +467,12 @@ export function apply(ctx) {
             if (!device && devices.length === 0) {
               if (browserState === 'failed' && browserError) {
                 throw new Error('浏览器端连接失败：' + browserError);
+              }
+              if (!hasCapablePoller()) {
+                throw new Error(
+                  '有标签页在轮询，但没有一个标签页持有设备：多半是同时开了多个 DSH 标签页，'
+                  + '只有一个连着设备。请只保留连着设备的那个标签页（其它关掉）再试。',
+                );
               }
               throw new Error('浏览器没有报告已连接设备，请先在设置页点「连接设备」');
             }
@@ -924,17 +978,41 @@ export function apply(ctx) {
       lastSeen = now();
       const pDev = payload.device || null;
       const pDevs = Array.isArray(payload.devices) ? payload.devices : (pDev ? [pDev] : []);
-      browserState = payload.state || null;
-      browserError = payload.lastError || null;
+      const tabId = payload.tabId ? String(payload.tabId) : '';
+      const capable = payload.capable === true || !!pDev || pDevs.length > 0;
+      notePoller(tabId, capable, payload.state);
+      if (capable) {
+        // 只有真的持有设备的页面才能代表「已连接」状态，否则两个标签页会来回翻转状态
+        browserState = payload.state || 'connected';
+        browserError = payload.lastError || null;
+      }
       if (pDev || pDevs.length) {
         // 有设备：更新并刷新粘性时间
         device = pDev;
         devices = pDevs;
         lastDeviceAt = now();
-      } else if (now() - lastDeviceAt > DEVICE_STICKY_MS) {
-        // 超过粘性窗口仍无设备：认定真正断开
+      } else if (!hasCapablePoller() && now() - lastDeviceAt > DEVICE_STICKY_MS) {
+        // 没有任何持有设备的页面在轮询，且超过粘性窗口：认定真正断开
         device = null;
         devices = [];
+        if (!capable) { browserState = 'idle'; }
+      }
+      // 任务被派给这个页面后，它却报告没有设备 → 把任务放回队列给真正持有设备的页面（最多重试 3 次）
+      if (!capable && tabId) {
+        for (const [jid, j] of jobs) {
+          if (j.tabId !== tabId) { continue; }
+          j.tabId = null;
+          j.attempt = (j.attempt || 0) + 1;
+          if (j.attempt > 3) {
+            jobs.delete(jid);
+            clearTimeout(j.timer);
+            j.reject(new Error('这个标签页上没有设备会话，任务重试 3 次仍失败：'
+              + (payload.lastError || '页面报告未连接设备')
+              + '。请只保留连着设备的那个 DSH 标签页。'));
+          } else {
+            queue.unshift({ id: jid, kind: j.kind, data: j.data });
+          }
+        }
       }
       // 窗口内收到 null 时保留上一次已知设备（重连/抖动期间不清）
       diag.lastLog = Array.isArray(payload.log) ? payload.log.slice(-30) : null;
@@ -948,7 +1026,16 @@ export function apply(ctx) {
       } catch (e) {
         diag.snapshotError = String((e && e.message) || e);
       }
-      return okValue({ job: queue.shift() || null, deviceSeen: device });
+      prunePollers();
+      let job = null;
+      if (capable) {
+        job = queue.shift() || null;
+        if (job) {
+          const rec = jobs.get(job.id);
+          if (rec) { rec.tabId = tabId; }
+        }
+      }
+      return okValue({ job, deviceSeen: device, capable, tabs: pollers.size });
     });
 
     const resultRoute = rpcRoute(async (method, payload) => {

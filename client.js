@@ -7304,6 +7304,10 @@ const STATE = {
   agc: { state: 'idle', qr: '', message: '' },   // 华为账号登录状态
   agcView: null,   // 遥控浏览器截图 { image, width, height }
   connection: null,   // 宿主 RPC 连接（用于把 HDC 日志送到宿主落盘）
+  // 每个页面实例一个稳定 id：宿主靠它区分标签页，只把任务发给「持有设备」的那个
+  tabId: (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : ('tab-' + Math.random().toString(36).slice(2) + Date.now().toString(36)),
   sessions: [],       // 多设备：每项 { id, kind, adb, hdc, device, info }
   activeId: null,     // 当前活跃设备 id
 };
@@ -8255,6 +8259,8 @@ function startBridge(connection) {
             active: x.id === STATE.activeId,
           })),
           activeId: STATE.activeId,
+          tabId: STATE.tabId,
+          capable: !!(STATE.adb || STATE.hdc),
           log: STATE.log && STATE.log.length ? STATE.log.slice(-80) : undefined,
           state: STATE.info ? 'connected' : (STATE.lastConnectError ? 'failed' : ((STATE.hdcPending || STATE.connectInFlight) ? 'connecting' : 'idle')),
           lastError: STATE.lastConnectError || null,

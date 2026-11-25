@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-device-bridge",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "private": false,
   "type": "module",
   "description": "在设置页通过 WebUSB 或本机 adb/hdc 连接安卓/鸿蒙手机：执行命令、截图、传文件、安装/卸载应用（双通道）。",

@@ -1756,3 +1756,21 @@ git tag `v0.2.3` 已推。
 - `runJob` 守卫先自愈再报错；错误文案改成「失效会话已自动清理，请重连」
 - 2 秒心跳里调用 `resyncActive()`
 - poll 上报只包含 `adb||hdc` 非空的会话，`device` 也要求有传输对象 —— 宿主不会再看到幻影设备
+
+## 2026-11-25 15:40 - 修「多标签页抢答」导致连接时通时不通（0.2.7）
+
+**证据（另一个 agent 实测）：** 连续 exec 探活 12 次 = ○●○●○●○●○●○●，严格 6 成 6 败；
+`browserState` 在 connected ↔ idle 之间来回切。装机能成一次、紧接着 25 次全失败。
+
+**根因：** 任务队列是全局的，`poll` 里 `queue.shift()` 谁先来就给谁。浏览器开两个 DSH 标签页时，
+连着设备的那个和没连的那个轮流取任务 → 落到没连的页面就返回「尚未连接设备」。
+这解释了严格交替，也解释了为什么 exec 偶尔成功、install 一失败就连续失败。
+
+**修复（0.2.7）：**
+- 客户端每次 poll 带上 `tabId`（页面级随机 id）和 `capable: !!(STATE.adb||STATE.hdc)`
+- 宿主按 `tabId` 记账 `pollers`；**只有 capable=true 的页面才能取任务**
+- 只有 capable 页面能改 `device/devices/browserState`（状态不再被空页面翻转）
+- 任务派给某页面后，它若上报 capable=false → 任务退回队列给真正持有设备的页面（最多 3 次后失败并说明原因）
+- `enqueue` 若 4 秒内没有任何 capable 页面，立即失败并提示"多半开着多个 DSH 页面"
+- `/status` 新增 `tabs:[{tab,capable,ageMs,state}]`、`capablePollerAgeMs`，agent 不再只能猜
+- `needBrowser()` 区分「根本没连」和「有页面在轮询但都不是设备持有者」
