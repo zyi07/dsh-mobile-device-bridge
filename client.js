@@ -7325,6 +7325,31 @@ function syncActiveToSessions() {
   }
 }
 
+/**
+ * 投影自愈：STATE.adb/hdc 只是「当前活跃设备」的投影，真实对象挂在 STATE.sessions 里。
+ * 曾经出现过 sessions 里有会话、但投影被清空的情况 —— 面板显示已连接，而所有任务都报
+ * 「浏览器端尚未连接设备」。这里把投影补回来；会话本身没有传输对象就说明它是死的，
+ * 直接移除，避免留下幻影连接。
+ */
+function resyncActive() {
+  const s = (STATE.sessions || []).find((x) => x.id === STATE.activeId);
+  if (!s) {
+    if (!STATE.adb && !STATE.hdc && STATE.info) { STATE.info = null; STATE.kind = null; }
+    return false;
+  }
+  if (!s.adb && !s.hdc) {
+    void removeSession(s.id);   // 死会话：清掉，让面板与宿主一起变成未连接
+    return false;
+  }
+  if (!STATE.adb && !STATE.hdc) {
+    STATE.adb = s.adb; STATE.hdc = s.hdc;
+    STATE.device = s.device; STATE.info = s.info; STATE.kind = s.kind;
+    if (s.log) { STATE.log = s.log; }
+    return true;
+  }
+  return false;
+}
+
 /** 把当前 STATE 里的设备登记为会话（并设为活跃） */
 function registerCurrentSession() {
   if (!STATE.kind || (!STATE.adb && !STATE.hdc)) { return; }
@@ -8127,7 +8152,10 @@ async function doTransferJob(job) {
 }
 
 async function runJob(job) {
-  if (!STATE.adb && !STATE.hdc) { return { ok: false, error: '浏览器端尚未连接设备（请在设置页点「连接设备」）' }; }
+  if (!STATE.adb && !STATE.hdc) { resyncActive(); }
+  if (!STATE.adb && !STATE.hdc) {
+    return { ok: false, error: '浏览器端没有可用的设备会话（失效会话已自动清理），请在设置页点「连接设备」重连' };
+  }
   const token = STATE.connectToken;
   const stale = () => STATE.connectToken !== token;
   try {
@@ -8217,10 +8245,10 @@ function startBridge(connection) {
       const started = Date.now();
       try {
         const res = await connection.rpc.call(BRIDGE, EP + '/poll', {
-          device: STATE.info
+          device: (STATE.info && (STATE.adb || STATE.hdc))
             ? { model: STATE.info.model, android: STATE.info.android, os: STATE.info.os, kind: STATE.kind, serial: STATE.info.serial }
             : null,
-          devices: (STATE.sessions || []).map((x) => ({
+          devices: (STATE.sessions || []).filter((x) => x.adb || x.hdc).map((x) => ({
             id: x.id, kind: x.kind,
             model: x.info && x.info.model || '',
             serial: x.info && x.info.serial || '',
@@ -8435,7 +8463,7 @@ function MobileBridgeSection(props) {
     } catch { /* ignore */ }
   }
   React.useEffect(() => {
-    const id = setInterval(() => setTick((n) => n + 1), 2000);
+    const id = setInterval(() => { resyncActive(); setTick((n) => n + 1); }, 2000);
     STATE.notify = () => setTick((n) => n + 1);
     agcRestoreSession();      // 打开设置页就把已保存的华为登录态读回来
 

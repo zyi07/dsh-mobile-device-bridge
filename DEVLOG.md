@@ -1739,3 +1739,20 @@ git tag `v0.2.3` 已推。
 - pickDevice 无设备错误文案补充「重试 2~3 次（多标签页抢答），不要改用 curl」
 - skill `prefer-mobile-bridge` 重写：front-matter 触发词扩到 手机/安卓/鸿蒙/HAP/签名/侧载/AGP/真机调试；
   正文顶部加「硬规则」5 条（先 devices、用工具不要 curl、装未签名 HAP 用 sign_install、报错先读文案、不假装）
+
+## 2026-11-25 15:10 - 修「状态显示已连接，但所有操作都报未连接」（0.2.6）
+
+**现象（本机实测复现）：**
+- `GET /mbridge/status` → `device` 有值、`devices` 1 台、`browserState=connected`
+- `POST /mbridge/exec {"cmd":"echo ok"}` → `{"ok":false,"error":"浏览器端尚未连接设备（请在设置页点「连接设备」）"}`
+- `POST /mbridge/screenshot {}` → 同样的错
+
+**根因：** `STATE.adb/hdc` 只是「活跃设备」的**投影**，真实对象挂在 `STATE.sessions`。
+出现 sessions 里有会话、`STATE.info` 也有值，但投影被清空的状态后：宿主按 `STATE.info` 判定已连接并派活，
+浏览器端 `runJob` 又因为 `!STATE.adb && !STATE.hdc` 直接拒绝 —— 两头不一致，面板显示"已连接"但什么都干不了。
+
+**修复（0.2.6）：**
+- 新增 `resyncActive()`：投影为空时从活跃会话回填；会话本身没有传输对象 → 判定为死会话并 `removeSession`（不留幻影）
+- `runJob` 守卫先自愈再报错；错误文案改成「失效会话已自动清理，请重连」
+- 2 秒心跳里调用 `resyncActive()`
+- poll 上报只包含 `adb||hdc` 非空的会话，`device` 也要求有传输对象 —— 宿主不会再看到幻影设备
