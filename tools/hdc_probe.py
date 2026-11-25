@@ -20,7 +20,7 @@ hdc_probe.py —— 用 libusb 直接跟 HarmonyOS 设备的 hdc 守护进程对
 用法：
   python hdc_probe.py                # 完整流程：静默读 → 发会话握手 → 读
   python hdc_probe.py --read-only    # 只读，什么都不发（最保守）
-  python hdc_probe.py --vid 12D1 --pid 1101 --serial DSHDEVICE0000001
+  python hdc_probe.py --vid 12D1 --pid 1101 --serial <DEVICE_SERIAL>
 """
 
 from __future__ import annotations

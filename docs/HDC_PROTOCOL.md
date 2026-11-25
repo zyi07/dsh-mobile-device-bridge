@@ -383,7 +383,7 @@ import 的 24 个 libusb 函数、替换 `bulk_transfer`/`submit_transfer` 等 4
 | 步 | 方向 | 帧长 | `f2 authType` | `f3` | `f4 connectKey` | `f5 buf` |
 |---|---|---|---|---|---|---|
 | 0 | H→D | 11 | — | — | — | `USBHead(option=2/RESET, len=0)` |
-| 1 | H→D | 180 | 0 `NONE` | **636423625** | `DSHDEVICE0000001` | 94B 特征串 |
+| 1 | H→D | 180 | 0 `NONE` | **636423625** | `<DEVICE_SERIAL>` | 94B 特征串 |
 | 2 | D→H | 99 | 3 `PUBLICKEY` | 0 | 空 | 33B `authtype        1               1` |
 | 3 | H→D | 708 | 3 | 0 | 空 | **641B = 主机名 + `0x0C` + PEM** |
 | 4 | D→H | 86 | 2 `SIGNATURE` | 0 | 空 | **20B token（纯 ASCII）** |

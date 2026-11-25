@@ -1795,29 +1795,6 @@ function MobileBridgeSection(props) {
       ),
     ));
 
-    // ---- 本地安装（绕开 WebUSB，用本机 hdc.exe）---- 仅鸿蒙：包是 HAP
-    if (info.kind === 'hdc') children.push(h('details', { key: 'locinstall', className: 'mb-card', style: { marginTop: '10px' } },
-      h('summary', { style: { cursor: 'pointer', userSelect: 'none' } }, '本地安装（推荐：用电脑上的 hdc.exe）'),
-      h('div', { className: 'mb-note', style: { marginTop: '6px', lineHeight: 1.7 } },
-        '如果 WebUSB 一直报「设备被独占」，可以先验证 hdc 安装链路：下载下面的'
-        + '示例包，用你电脑上 DevEco 自带的 hdc.exe 安装。hdc 自己占用设备，不经过浏览器。'),
-      h('div', { className: 'mb-row', style: { marginTop: '8px' } },
-        h('a', {
-          className: 'mb-btn',
-          href: '/mbridge/agc/hap',
-          download: 'dsh_demo_signed.hap',
-          style: { textDecoration: 'none', display: 'inline-block' },
-        }, '下载示例包（9.9 MB）'),
-      ),
-      h('div', { className: 'mb-note', style: { marginTop: '10px' } }, '下载完成后，在 PowerShell 里运行这一条：'),
-      h('pre', { className: 'mb-out', style: { whiteSpace: 'pre-wrap', userSelect: 'all' } },
-        '& "C:\\Program Files\\Huawei\\DevEco Studio\\sdk\\default\\openharmony\\toolchains\\hdc.exe" install -r "$env:USERPROFILE\\Downloads\\dsh_demo_signed.hap"'),
-      h('div', { className: 'mb-note', style: { marginTop: '6px' } },
-        '说明：这是打包时固定生成的示例包，包名 com.dsh.bridgeapp，签名材料绑定的是开发机那台设备。'
-        + '它只能用来验证 hdc 安装链路通不通，不能安装你自己的应用。'
-        + '「针对任意应用自动申请证书 / Profile 并签名」的能力还没做完，别把它当成能用。'),
-    ));
-
     children.push(h('div', { key: 'sh', className: 'mb-row' },
       h('input', {
         className: 'mb-input',

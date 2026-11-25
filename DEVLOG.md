@@ -952,7 +952,7 @@ Cookie 仍然自动抓取，后续 AGC 自动化不受影响。
 | `getUserInfo` | 200，「<ACCOUNT_NICK>」 |
 | `projectList` | 200，2 个项目 |
 | `app/list` | 200，2 个应用（`com.zyiii.noteoh` / `com.zhangyi.bankstatement`） |
-| `device/list` | 200，**4 台设备，含本机 `HoKit_<UDID_PREFIX>`（<DEVICE_UDID>）id=<CLOUD_DEVICE_ID>** |
+| `device/list` | 200，**4 台设备，含本机 `HoKit_<DEVICE_UDID_PREFIX>`（<DEVICE_UDID>）id=<CLOUD_DEVICE_ID>** |
 | `cert/list` | 200，4 张证书，含调试证书 `hokit_debug`、`auto_debug_…` |
 | `provision/list` | 200，有 `com.zyiii.noteoh` 的发布 Profile |
 
@@ -1376,7 +1376,7 @@ F5 无效，**重启电脑才恢复**。任务管理器无 hdc/华为进程。
 
 | 验证项 | 结果 |
 |---|---|
-| 两台同时连接 | ✅ adb:RPGGK20914000028(TNY-AL00) + hdc:DSHDEVICE0000001(PLA-AL10) |
+| 两台同时连接 | ✅ adb:RPGGK20914000028(TNY-AL00) + hdc:<DEVICE_SERIAL>(PLA-AL10) |
 | /status 显示 | ✅ devices 数组两台，active 正确 |
 | 切换 4 次执行 | ✅ 切安卓 getprop→TNY-AL00；切鸿蒙 param get→PLA-AL10，全部打对 |
 | 切换后不泄漏 | ✅ 仍两台在，claim 未泄漏 |
@@ -1619,7 +1619,7 @@ exec/screenshot 全部报「浏览器没有报告已连接设备」；diag.lastL
 
 ## 2026-11-23 18:26 - 真机快速联调（鸿蒙 PLA-AL10）
 
-**结果（全部经 /mbridge 接口实测）：** 设备识别 PLA-AL10 / HarmonyOS API 26 / DSHDEVICE0000001；
+**结果（全部经 /mbridge 接口实测）：** 设备识别 PLA-AL10 / HarmonyOS API 26 / <DEVICE_SERIAL>；
 exec 1.4s（bm get -u 返回 UDID）；截图 4.5s（1316×2832 JPEG 266KB）；push 58B 落 /data/local/tmp 后 ls+cat 校验一致；
 pull 0.7s/1.5s 内容一致；华为登录 state=success hasJwt=true cookieCount=18。
 
@@ -1774,3 +1774,18 @@ git tag `v0.2.3` 已推。
 - `enqueue` 若 4 秒内没有任何 capable 页面，立即失败并提示"多半开着多个 DSH 页面"
 - `/status` 新增 `tabs:[{tab,capable,ageMs,state}]`、`capablePollerAgeMs`，agent 不再只能猜
 - `needBrowser()` 区分「根本没连」和「有页面在轮询但都不是设备持有者」
+
+## 2026-11-25 15:35 - 隐私清理 + 0.2.8
+
+**问题：** 公开仓库/ npm 包里带着开发机隐私：
+`assets/dsh_demo_signed.hap`（10.3MB）里的调试 Profile 嵌着设备 UDID、团队 ID 与账号真名；
+`DEVLOG.md`、`docs/HDC_*.md`、`src-client/hdc/fixtures.json`、`tools/hdc_probe*.py`、`tools/agc_provision.py`
+里还有序列号 / UDID / teamId / 账号名（包括 hex 形式）。
+
+**处置：**
+- 示例包删除（`/mbridge/agc/hap` 改为 410，UI 里的「下载示例包」整块移除）→ npm 包从 10.4MB 降到 132KB
+- 文本文件里的序列号/UDID/团队 ID/账号名一律替换成占位符；fixtures 换成等长假序列号（并同步替换 hex），测试仍全绿
+- `.gitignore` 已覆盖 `__pycache__/`、`*.pyc`、`*.tgz`
+- 版本 0.2.8，`npm publish` 完成
+
+**遗留：** 历史提交里仍有旧 blob（示例包与明文标识），需要重写历史 + force-with-lease 才能彻底清除；npm 上 0.2.7 及更早版本的 tarball 里也含该示例包，需 unpublish 或由作者决定。

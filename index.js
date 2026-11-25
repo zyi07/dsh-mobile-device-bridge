@@ -703,60 +703,14 @@ export function apply(ctx) {
 
           // 提供已签名 HAP 下载（用本机 hdc 安装，绕开 WebUSB 抢设备）
           if (path === ROUTE_PREFIX + '/agc/hap' && req.method === 'GET') {
-            const fs = await import('node:fs/promises');
-            const here = nodePath.dirname(nodeFileURLToPath(import.meta.url));
-            const file = nodePath.join(here, 'assets', 'dsh_demo_signed.hap');
-            try {
-              const buf = await fs.readFile(file);
-              res.writeHead(200, {
-                'content-type': 'application/octet-stream',
-                'content-disposition': 'attachment; filename="dsh_demo_signed.hap"',
-                'content-length': String(buf.length),
-              });
-              res.end(buf);
-            } catch (e) {
-              send(res, 404, { ok: false, error: '安装包不存在：' + String(e && e.message ? e.message : e) });
-            }
+            // 示例包已移除：它里面嵌着开发机的调试 Profile（含设备 UDID），不适合随插件分发
+            send(res, 410, {
+              ok: false,
+              error: '示例包已移除（其中嵌有开发机的调试 Profile）。请用「华为账号（ID自签）」给自己的 HAP 签名后安装。',
+            });
             return;
           }
 
-          // 读未签名 HAP 的包名/版本（面板选完文件自动回填，不用手工输）
-          if (path === ROUTE_PREFIX + '/agc/hap-info' && req.method === 'POST') {
-            const body = await readBody(req, 256 << 20);
-            const fs = await import('node:fs/promises');
-            const here = nodePath.dirname(nodeFileURLToPath(import.meta.url));
-            const script = nodePath.join(here, 'tools', 'agc_sign.py');
-            let hapPath = String(body.hapPath || '').trim();
-            let tmpDir = '';
-            try {
-              if (!hapPath) {
-                if (!body.base64) { send(res, 400, { ok: false, error: '缺少 hapPath 或 base64' }); return; }
-                tmpDir = await fs.mkdtemp(nodePath.join(nodeOs.tmpdir(), 'mbridge-hapinfo-'));
-                hapPath = nodePath.join(tmpDir, String(body.filename || 'input.hap'));
-                await fs.writeFile(hapPath, Buffer.from(String(body.base64), 'base64'));
-              }
-              const out = await new Promise((resolve) => {
-                const p = nodeSpawn('python3', [script, '--hap', hapPath, '--info', '--json'], { env: process.env });
-                let o = '', e = '';
-                p.stdout.on('data', (c) => { o += c; });
-                p.stderr.on('data', (c) => { e += c; });
-                p.on('close', (code) => resolve({ code, o, e }));
-                p.on('error', (err) => resolve({ code: -1, o: '', e: String(err) }));
-              });
-              let info = null;
-              try { info = JSON.parse((out.o || '').trim().split('\n').filter(Boolean).pop() || '{}'); } catch { info = null; }
-              if (!info || !info.bundleName) {
-                send(res, 200, { ok: false, error: '读不到包名: ' + (out.e || out.o || '').slice(-300) });
-                return;
-              }
-              send(res, 200, { ok: true, ...info });
-            } catch (e) {
-              send(res, 500, { ok: false, error: String(e && e.message ? e.message : e) });
-            }
-            return;
-          }
-
-          // 安装一个已经签好的本地 HAP（配合 /agc/sign 两步式：先签名，用户点「安装到设备」再走这里）
           if (path === ROUTE_PREFIX + '/agc/install-signed' && req.method === 'POST') {
             const body = await readBody(req, 4096);
             const p = String(body.path || '').trim();
